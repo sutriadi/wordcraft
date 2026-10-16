@@ -87,7 +87,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wordcraft-android-0.1.0-debug
+          name: wordcraft-android-debug
           path: apps/wordcraft-android/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 

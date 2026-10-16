@@ -112,6 +112,8 @@ pub struct Services {
     pub open_async: Option<Box<dyn Fn(&str)>>,
     /// Web: files (name, bytes) delivered asynchronously (picker, drag and drop).
     pub inbox: Option<Inbox>,
+    /// Touch-first host (Android): the document's scroll bars stay visible and wide enough to grab.
+    pub touch_ui: bool,
     /// Web: pictures pasted from the browser's clipboard (the bytes; the name is ignored). Kept
     /// apart from `inbox` because a paste only lands in the document when the page is the edit
     /// target (#1349), where a dropped or opened file always lands.

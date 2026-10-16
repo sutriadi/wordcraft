@@ -12,6 +12,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod bridge;
+pub mod touch;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -37,6 +38,7 @@ struct AndroidShell {
     tickets: Rc<RefCell<HashMap<u64, u64>>>,
     /// Open pickers shown and not yet answered.
     opens_open: Rc<RefCell<u32>>,
+    touch: touch::TouchScroll,
 }
 
 impl eframe::App for AndroidShell {
@@ -65,7 +67,12 @@ impl eframe::App for AndroidShell {
         self.app.logic(ctx);
     }
 
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        let now = raw.time.unwrap_or(0.0);
+        self.touch.filter(raw, now);
+        if self.touch.is_pending() {
+            ctx.request_repaint_after(Duration::from_millis(100)); // catches a long press
+        }
         self.app.raw_input_hook(raw);
     }
 
@@ -99,6 +106,7 @@ fn services(inbox: Inbox, bridge: Rc<Bridge>, saves: AsyncSaves, tickets: Rc<Ref
             }
         })),
         inbox: Some(inbox),
+        touch_ui: true,
         ..Default::default()
     }
 }
@@ -122,7 +130,7 @@ pub fn run(options: eframe::NativeOptions, bridge_root: PathBuf) -> eframe::Resu
             app.autosave = false;
             app.start_screen();
             let _ = &cc.egui_ctx;
-            Ok(Box::new(AndroidShell { app, inbox, bridge, saves, tickets, opens_open }))
+            Ok(Box::new(AndroidShell { app, inbox, bridge, saves, tickets, opens_open, touch: touch::TouchScroll::default() }))
         }),
     )
 }
@@ -133,9 +141,21 @@ pub fn run(options: eframe::NativeOptions, bridge_root: PathBuf) -> eframe::Resu
 #[unsafe(no_mangle)]
 pub fn android_main(app: android_activity::AndroidApp) {
     android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("WordCraft"));
-    let root = app.internal_data_path().unwrap_or_else(|| PathBuf::from("/data/local/tmp")).join("bridge");
+    let data = app.internal_data_path().unwrap_or_else(|| PathBuf::from("/data/local/tmp"));
+    install_panic_report(data.join("crash.txt"));
+    let root = data.join("bridge");
     let options = eframe::NativeOptions { android_app: Some(app), ..Default::default() };
     if let Err(e) = run(options, root) {
         log::error!("WordCraft stopped: {e}");
     }
+}
+
+/// Records a panic where the Kotlin side can show it on the next launch (there is no console on a tablet).
+#[cfg(target_os = "android")]
+fn install_panic_report(path: PathBuf) {
+    std::panic::set_hook(Box::new(move |info| {
+        let report = format!("{info}\n\n{}", std::backtrace::Backtrace::force_capture());
+        log::error!("panic: {report}");
+        let _ = std::fs::write(&path, report);
+    }));
 }

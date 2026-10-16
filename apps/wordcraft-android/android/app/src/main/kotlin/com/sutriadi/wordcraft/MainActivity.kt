@@ -36,6 +36,7 @@ class MainActivity : NativeActivity() {
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
         root = File(filesDir, "bridge")
+        showPreviousCrash()
         handler.postDelayed(poller, POLL_MS)
     }
 
@@ -96,15 +97,23 @@ class MainActivity : NativeActivity() {
             File(inDir, "${pending.id}.cancel").writeText("")
             return
         }
-        try {
-            val name = displayName(uri).replace(Regex("[/\\\\:]"), "_")
-            val tmp = File(inDir, "${pending.id}__$name.tmp")
-            contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } }
-                ?: throw IllegalStateException("cannot open $uri")
-            tmp.renameTo(File(inDir, "${pending.id}__$name"))
-        } catch (e: Exception) {
-            File(inDir, "${pending.id}.cancel").writeText("")
-        }
+        // Copy off the main thread: a phone photo can be many megabytes and a slow provider would freeze the UI.
+        Thread {
+            try {
+                var name = displayName(uri).replace(Regex("[/\\\\:]"), "_")
+                if (!name.substringAfterLast('.', "").let { it.isNotEmpty() && it.length <= 5 }) {
+                    // Pickers (Google Photos, Samsung Gallery) may give a name without an extension; the app routes by extension.
+                    val ext = contentResolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
+                    if (ext != null) name = "$name.$ext"
+                }
+                val tmp = File(inDir, "${pending.id}__$name.tmp")
+                contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                    ?: throw IllegalStateException("cannot open $uri")
+                tmp.renameTo(File(inDir, "${pending.id}__$name"))
+            } catch (e: Throwable) {
+                File(inDir, "${pending.id}.cancel").writeText("")
+            }
+        }.start()
     }
 
     private fun finishSave(pending: Pending.Save, uri: Uri?) {
@@ -123,6 +132,40 @@ class MainActivity : NativeActivity() {
         val tmp = File(res, "save-${pending.id}.tmp")
         tmp.writeText(result)
         tmp.renameTo(File(res, "save-${pending.id}.res"))
+    }
+
+    /** Shows what killed the app last time: a Rust panic (crash.txt) or Android's own exit reason. */
+    private fun showPreviousCrash() {
+        val crash = File(filesDir, "crash.txt")
+        var text: String? = null
+        if (crash.exists()) {
+            text = crash.readText().take(3500)
+            crash.delete()
+        } else if (android.os.Build.VERSION.SDK_INT >= 30) {
+            try {
+                val am = getSystemService(android.app.ActivityManager::class.java)
+                val last = am.getHistoricalProcessExitReasons(packageName, 0, 1).firstOrNull()
+                val reasons = setOf(
+                    android.app.ApplicationExitInfo.REASON_CRASH_NATIVE,
+                    android.app.ApplicationExitInfo.REASON_CRASH,
+                    android.app.ApplicationExitInfo.REASON_SIGNALED,
+                    android.app.ApplicationExitInfo.REASON_LOW_MEMORY,
+                )
+                val seen = getPreferences(MODE_PRIVATE)
+                if (last != null && last.reason in reasons && last.timestamp != seen.getLong("exit_seen", 0L)) {
+                    seen.edit().putLong("exit_seen", last.timestamp).apply()
+                    text = "Android ended the previous run: reason=${last.reason} status=${last.status}\n${last.description ?: ""}"
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        text?.let {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("WordCraft stopped last time")
+                .setMessage(it)
+                .setPositiveButton("OK", null)
+                .show()
+        }
     }
 
     private fun displayName(uri: Uri): String {

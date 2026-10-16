@@ -947,6 +947,19 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     app.canvas.scroll_to_caret = false;
     let mut origin = area.min;
     let mut ui_area = ui.new_child(egui::UiBuilder::new().max_rect(area));
+    if app.services.touch_ui {
+        // Floating bars are hover-only, so a finger never sees them: keep them drawn and thick.
+        let s = &mut ui_area.style_mut().spacing.scroll;
+        s.floating = true;
+        s.bar_width = 18.0;
+        s.floating_width = 10.0;
+        s.handle_min_length = 48.0;
+        s.dormant_handle_opacity = 0.55;
+        s.dormant_background_opacity = 0.12;
+        s.active_handle_opacity = 0.8;
+        s.interact_handle_opacity = 0.95;
+        s.foreground_color = true;
+    }
     // The canvas scrolls itself on wheel/touchpad input (crate::scroll): touchpads 1:1 with
     // momentum, wheel notches eased in (or all at once with animation effects off). Applied
     // before drawing, so it shows this frame. In reading mode, wheel and touchpad events turn

@@ -179,7 +179,9 @@ mod tests {
         let id = b.request_save("../evil/Report.docx", b"data").expect("request");
         assert_eq!(fs::read_to_string(root.join("req").join(format!("save-{id}.req"))).expect("req"), "Report.docx");
         assert_eq!(fs::read(root.join("req").join(format!("save-{id}.bin"))).expect("bin"), b"data");
-        for (body, want) in [("ok", SaveResult::Saved), ("cancel", SaveResult::Cancelled), ("fail: disk full", SaveResult::Failed("disk full".into()))] {
+        for (body, want) in
+            [("ok", SaveResult::Saved), ("cancel", SaveResult::Cancelled), ("fail: disk full", SaveResult::Failed("disk full".into()))]
+        {
             fs::write(root.join("res").join(format!("save-{id}.res")), body).expect("write");
             assert_eq!(b.poll().saves, vec![(id, want)]);
         }

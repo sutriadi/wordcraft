@@ -64,7 +64,7 @@ jobs:
           echo "sdkmanager: $SDKM (SDK: $SDK)"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           yes | "$SDKM" --sdk_root="$SDK" --licenses > /dev/null || true
-          "$SDKM" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
+          "$SDKM" --sdk_root="$SDK" "platforms;android-36" "build-tools;36.0.0" "ndk;${NDK_VERSION}"
 
       - uses: taiki-e/install-action@v2
         with:
@@ -90,7 +90,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.10.2"
+          gradle-version: "8.11.1"
 
       - name: Build debug APK
         working-directory: apps/wordcraft-android/android

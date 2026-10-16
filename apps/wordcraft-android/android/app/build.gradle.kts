@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "com.sutriadi.wordcraft"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.sutriadi.wordcraft"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         // Play needs a higher versionCode for every upload; CI passes its run number.
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = "0.1.001"

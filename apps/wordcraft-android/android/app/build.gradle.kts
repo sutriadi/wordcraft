@@ -11,14 +11,31 @@ android {
         applicationId = "com.sutriadi.wordcraft"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        // Play needs a higher versionCode for every upload; CI passes its run number.
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = "0.1.001"
         // Only the ABIs `build-android.sh` produces.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
+    // Upload key: only configured when CI provides the keystore (see .github/workflows/android.yml).
+    val keystorePath = System.getenv("ANDROID_KEYSTORE_FILE")
+    signingConfigs {
+        if (keystorePath != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

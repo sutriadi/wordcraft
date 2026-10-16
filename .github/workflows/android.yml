@@ -24,7 +24,7 @@ permissions:
   contents: write
 
 env:
-  NDK_VERSION: 27.2.12479018
+  NDK_VERSION: 28.0.13004108
 
 jobs:
   apk:
@@ -77,6 +77,17 @@ jobs:
             -o apps/wordcraft-android/android/app/src/main/jniLibs \
             build --release -p wordcraft-android
 
+      - name: Check 16 KB page alignment of the native library
+        run: |
+          set -euo pipefail
+          for so in $(find apps/wordcraft-android/android/app/src/main/jniLibs -name '*.so'); do
+            align=$(readelf -lW "$so" | awk '$1=="LOAD" {print $NF}' | sort -u | tr '\n' ' ')
+            echo "$so: LOAD align = $align"
+            for a in $align; do
+              if [ $((a)) -lt 16384 ]; then echo "::error::$so is not 16 KB aligned"; exit 1; fi
+            done
+          done
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
@@ -89,6 +100,31 @@ jobs:
         with:
           name: wordcraft-android-debug
           path: apps/wordcraft-android/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Build release AAB for Google Play
+        working-directory: apps/wordcraft-android/android
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "${KS_B64:-}" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/upload-keystore.jks"
+            export ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/upload-keystore.jks"
+            echo "Signing the AAB with the upload key."
+            echo "AAB_SIGNED=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No keystore secrets set: the AAB is UNSIGNED and Google Play will reject it."
+            echo "AAB_SIGNED=false" >> "$GITHUB_ENV"
+          fi
+          gradle :app:bundleRelease --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wordcraft-android-aab
+          path: apps/wordcraft-android/android/app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
 
       - name: Publish GitHub release

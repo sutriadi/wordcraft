@@ -15,6 +15,14 @@ Linux host; the Android build (NDK, Gradle, Kotlin) was written without being ab
 
 ## Build
 
+On Windows, first check the machine (read-only, changes nothing):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File apps\wordcraft-android\check-env.ps1
+```
+
+Then:
+
 ```sh
 rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk

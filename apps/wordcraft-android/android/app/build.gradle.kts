@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.storytold.wordcraft"
+    namespace = "com.sutriadi.wordcraft"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.storytold.wordcraft"
+        applicationId = "com.sutriadi.wordcraft"
         minSdk = 26
         targetSdk = 35
         versionCode = 1

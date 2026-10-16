@@ -1,4 +1,4 @@
-package com.storytold.wordcraft
+package com.sutriadi.wordcraft
 
 import android.app.NativeActivity
 import android.content.Intent

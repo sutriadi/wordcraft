@@ -34,8 +34,25 @@ jobs:
 
       - name: Install SDK platform, build-tools and NDK
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
+          set -euxo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ]; then
+            SDKM="$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -n1 || true)"
+          fi
+          if [ -z "$SDKM" ]; then
+            # No preinstalled command-line tools: download them.
+            mkdir -p "$SDK/cmdline-tools"
+            curl -fsSL -o /tmp/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools
+            rm -rf "$SDK/cmdline-tools/latest"
+            mv /tmp/cmdline-tools/cmdline-tools "$SDK/cmdline-tools/latest"
+            SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          echo "sdkmanager: $SDKM (SDK: $SDK)"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          yes | "$SDKM" --sdk_root="$SDK" --licenses > /dev/null || true
+          "$SDKM" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
 
       - uses: taiki-e/install-action@v2
         with:

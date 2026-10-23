@@ -143,6 +143,7 @@ pub struct EventLoop<T: 'static> {
     cause: StartCause,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
+    modifiers: crate::keyboard::ModifiersState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +193,7 @@ impl<T: 'static> EventLoop<T> {
             cause: StartCause::Init,
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
+            modifiers: crate::keyboard::ModifiersState::empty(),
         })
     }
 
@@ -508,6 +510,36 @@ impl<T: 'static> EventLoop<T> {
                             KeyAction::Up => event::ElementState::Released,
                             _ => event::ElementState::Released,
                         };
+
+                        // Patched for WordCraft: Android only reports modifiers in each key's meta
+                        // state; without ModifiersChanged, Ctrl+Backspace is a plain Backspace.
+                        {
+                            use crate::keyboard::ModifiersState;
+                            let meta = key.meta_state();
+                            let mut now = ModifiersState::empty();
+                            if meta.shift_on() {
+                                now |= ModifiersState::SHIFT;
+                            }
+                            if meta.ctrl_on() {
+                                now |= ModifiersState::CONTROL;
+                            }
+                            if meta.alt_on() {
+                                now |= ModifiersState::ALT;
+                            }
+                            if meta.meta_on() {
+                                now |= ModifiersState::SUPER;
+                            }
+                            if now != self.modifiers {
+                                self.modifiers = now;
+                                callback(
+                                    event::Event::WindowEvent {
+                                        window_id: window::WindowId(WindowId),
+                                        event: event::WindowEvent::ModifiersChanged(now.into()),
+                                    },
+                                    self.window_target(),
+                                );
+                            }
+                        }
 
                         let key_char = keycodes::character_map_and_combine_key(
                             android_app,

@@ -45,6 +45,18 @@ pub struct Bridge {
     next: Cell<u64>,
 }
 
+/// Parses `"left top right bottom"`; anything malformed gives zeros, and values are clamped to sane sizes.
+pub fn parse_insets(text: &str) -> [f32; 4] {
+    let mut out = [0.0f32; 4];
+    let parts: Vec<f32> = text.split_whitespace().filter_map(|p| p.parse::<f32>().ok()).collect();
+    if parts.len() == 4 {
+        for (o, v) in out.iter_mut().zip(parts) {
+            *o = if v.is_finite() { v.clamp(0.0, 4000.0) } else { 0.0 };
+        }
+    }
+    out
+}
+
 /// A file name with any folder part and control characters removed.
 pub fn safe_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
@@ -71,6 +83,13 @@ impl Bridge {
             fs::create_dir_all(&dir)?;
         }
         Ok(Self { root, next: Cell::new(1) })
+    }
+
+    /// System bar / cutout / keyboard insets in physical pixels (left, top, right, bottom), as last
+    /// written by the Kotlin side to `<root>/../insets`. Zeros when unknown.
+    pub fn insets(&self) -> [f32; 4] {
+        let text = self.root.parent().map(|p| p.join("insets")).and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+        parse_insets(&text)
     }
 
     fn take_id(&self) -> u64 {
@@ -141,6 +160,14 @@ impl Bridge {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn insets_parse_and_reject_junk() {
+        assert_eq!(super::parse_insets("0 96 0 144"), [0.0, 96.0, 0.0, 144.0]);
+        assert_eq!(super::parse_insets("1 2 3"), [0.0; 4]);
+        assert_eq!(super::parse_insets("a b c d"), [0.0; 4]);
+        assert_eq!(super::parse_insets("-5 1e9 0 0"), [0.0, 4000.0, 0.0, 0.0]);
+    }
+
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {

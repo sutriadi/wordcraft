@@ -39,6 +39,28 @@ struct AndroidShell {
     /// Open pickers shown and not yet answered.
     opens_open: Rc<RefCell<u32>>,
     touch: touch::TouchScroll,
+    insets: [f32; 4],
+    insets_read: f64,
+}
+
+impl AndroidShell {
+    /// Keeps the UI clear of the status bar, navigation bar, cutout and keyboard. Targeting API 35+
+    /// draws apps edge to edge, so the system bars would otherwise cover the ribbon and status line.
+    fn apply_insets(&mut self, raw: &mut egui::RawInput, now: f64) {
+        if now - self.insets_read >= 0.25 || self.insets_read > now {
+            self.insets_read = now;
+            self.insets = self.bridge.insets();
+        }
+        let ppp = raw.viewports.get(&raw.viewport_id).and_then(|v| v.native_pixels_per_point).unwrap_or(1.0).max(0.1);
+        if let Some(full) = raw.screen_rect {
+            let [l, t, r, b] = self.insets.map(|px| px / ppp);
+            let min = full.min + egui::vec2(l, t);
+            let max = full.max - egui::vec2(r, b);
+            if max.x - min.x > 100.0 && max.y - min.y > 100.0 {
+                raw.screen_rect = Some(egui::Rect::from_min_max(min, max));
+            }
+        }
+    }
 }
 
 impl eframe::App for AndroidShell {
@@ -75,6 +97,7 @@ impl eframe::App for AndroidShell {
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         let now = raw.time.unwrap_or(0.0);
+        self.apply_insets(raw, now);
         self.touch.filter(raw, now);
         if self.touch.is_pending() {
             ctx.request_repaint_after(Duration::from_millis(100)); // catches a long press
@@ -136,7 +159,17 @@ pub fn run(options: eframe::NativeOptions, bridge_root: PathBuf) -> eframe::Resu
             app.autosave = false;
             app.start_screen();
             let _ = &cc.egui_ctx;
-            Ok(Box::new(AndroidShell { app, inbox, bridge, saves, tickets, opens_open, touch: touch::TouchScroll::default() }))
+            Ok(Box::new(AndroidShell {
+                app,
+                inbox,
+                bridge,
+                saves,
+                tickets,
+                opens_open,
+                touch: touch::TouchScroll::default(),
+                insets: [0.0; 4],
+                insets_read: -1.0,
+            }))
         }),
     )
 }

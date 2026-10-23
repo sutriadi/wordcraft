@@ -105,4 +105,6 @@ debug = 0
 
 # Required by craft-pdf: the backend rejects writers that failed during unwinding.
 [patch.crates-io]
+# Android: mouse hover/buttons/wheel (upstream winit 0.30 treats a mouse as a finger and drops the wheel).
+winit = { path = "vendor/winit" }
 krilla = { git = "https://github.com/storytold/craft-libs", rev = "c3487320b2d1de657b860b3c8abb44e1f2b32bd8" }

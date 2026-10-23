@@ -37,6 +37,7 @@ class MainActivity : NativeActivity() {
         super.onCreate(savedInstanceState)
         root = File(filesDir, "bridge")
         showPreviousCrash()
+        publishInsets()
         handler.postDelayed(poller, POLL_MS)
     }
 
@@ -135,6 +136,34 @@ class MainActivity : NativeActivity() {
     }
 
     /** Shows what killed the app last time: a Rust panic (crash.txt) or Android's own exit reason. */
+    /**
+     * Android 15+ draws apps edge to edge, so the status bar, navigation bar, camera cutout and
+     * keyboard overlap the app. Tell the Rust side how much room they take (pixels: l t r b).
+     */
+    private fun publishInsets() {
+        val decor = window.decorView
+        decor.setOnApplyWindowInsetsListener { v, insets ->
+            val box = if (android.os.Build.VERSION.SDK_INT >= 30) {
+                val type = android.view.WindowInsets.Type.systemBars() or
+                    android.view.WindowInsets.Type.displayCutout() or
+                    android.view.WindowInsets.Type.ime()
+                val i = insets.getInsets(type)
+                intArrayOf(i.left, i.top, i.right, i.bottom)
+            } else {
+                @Suppress("DEPRECATION")
+                intArrayOf(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+            }
+            try {
+                val tmp = File(filesDir, "insets.tmp")
+                tmp.writeText(box.joinToString(" "))
+                tmp.renameTo(File(filesDir, "insets"))
+            } catch (_: Throwable) {
+            }
+            v.onApplyWindowInsets(insets)
+        }
+        decor.requestApplyInsets()
+    }
+
     private fun showPreviousCrash() {
         val crash = File(filesDir, "crash.txt")
         var text: String? = null

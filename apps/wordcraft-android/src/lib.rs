@@ -45,11 +45,17 @@ impl eframe::App for AndroidShell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let polled = self.bridge.poll();
         for file in polled.files {
-            *self.opens_open.borrow_mut() = self.opens_open.borrow().saturating_sub(1);
+            {
+                let mut open = self.opens_open.borrow_mut();
+                *open = open.saturating_sub(1);
+            }
             self.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(file);
         }
         for _ in polled.cancelled_opens {
-            *self.opens_open.borrow_mut() = self.opens_open.borrow().saturating_sub(1);
+            {
+                let mut open = self.opens_open.borrow_mut();
+                *open = open.saturating_sub(1);
+            }
         }
         for (id, result) in polled.saves {
             if let Some(ticket) = self.tickets.borrow_mut().remove(&id) {

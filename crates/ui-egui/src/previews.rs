@@ -228,6 +228,7 @@ impl Previews {
             let key = format!("font:{name}");
             let tex: Option<TextureHandle> = ui.ctx().data(|d| d.get_temp::<TextureHandle>(egui::Id::new(&key)));
             let (r, resp) = ui.allocate_exact_size(vec2(260.0, crate::widgets::COMBO_PREVIEW_ROW_H), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
             let t = Tokens::get(ui.ctx());
             if resp.hovered() {
                 ui.painter().rect_filled(r, 3.0, t.hover);
@@ -504,6 +505,10 @@ pub fn style_preview(app: &mut WordApp, ui: &mut Ui, id: &str, ty: &str, size: e
     }
 }
 
+/// Tiles the Home tab's Styles gallery shows, as designed and in a compact group.
+const STYLE_TILES: usize = 6;
+const STYLE_TILES_COMPACT: usize = 3;
+
 /// The Home tab's Styles gallery.
 pub fn style_gallery(app: &mut WordApp, ui: &mut Ui, state: &Value) {
     let t = Tokens::get(ui.ctx());
@@ -513,7 +518,9 @@ pub fn style_gallery(app: &mut WordApp, ui: &mut Ui, state: &Value) {
     let skey = app.previews.styles_key(&app.session.doc, rev);
     let ppp = ui.ctx().pixels_per_point();
     let start = ui.data(|d| d.get_temp::<usize>(egui::Id::new("gallery_start"))).unwrap_or(0).min(styles.len().saturating_sub(1));
-    let visible = 6usize;
+    // A compact ribbon group (#662, #1285) trims the gallery to fewer tiles before it folds.
+    let visible = if crate::ribbon_fit::compact(ui.ctx()) { STYLE_TILES_COMPACT } else { STYLE_TILES };
+    crate::ribbon_fit::add_saving(ui.ctx(), (STYLE_TILES - STYLE_TILES_COMPACT) as f32 * 76.0);
     let (area, _) = ui.allocate_exact_size(vec2(visible as f32 * 76.0 + 18.0, crate::widgets::CONTENT_H), Sense::hover());
     ui.painter().rect(area.shrink(1.0), 4.0, t.input, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
     for (k, (id, name)) in styles.iter().skip(start).take(visible).enumerate() {
@@ -686,6 +693,83 @@ mod tests {
             }
         }
         assert!(loaded.len() <= 2, "previewing loaded {loaded:?}");
+    }
+
+    /// A window whose Styles gallery lists `style` first: runs the gallery for a few frames and
+    /// returns the painted shapes of the last one and every texture picture uploaded on the way.
+    fn run_gallery(mut doc: Document, style: wordcraft_doc::styles::Style) -> (Vec<egui::epaint::ClippedShape>, Vec<egui::ColorImage>) {
+        // Only the style under test is in the gallery.
+        for other in &mut doc.styles.styles {
+            other.quick = false;
+        }
+        doc.styles.upsert(style);
+        let mut app = WordApp::new(wordcraft_engine::Session::new(doc), Default::default());
+        app.ui.language = "en".into();
+        let ctx = egui::Context::default();
+        let mut shapes = Vec::new();
+        let mut images = Vec::new();
+        for frame in 0..6 {
+            let input = egui::RawInput {
+                time: Some(f64::from(frame) * 0.1),
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 200.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                ui.add_space(20.0);
+                style_gallery(&mut app, ui, &json!({}));
+            });
+            for (_, deltas) in out.textures_delta.set.drain() {
+                for delta in deltas {
+                    if let (None, egui::ImageData::Color(img)) = (delta.pos, &delta.image) {
+                        images.push(egui::ColorImage::clone(img));
+                    }
+                }
+            }
+            out.textures_delta.clear();
+            shapes = out.shapes;
+        }
+        (shapes, images)
+    }
+
+    fn gallery_style(name: &str) -> wordcraft_doc::styles::Style {
+        wordcraft_doc::styles::Style { id: "Backfill".into(), name: name.into(), quick: true, priority: Some(0), ..Default::default() }
+    }
+
+    /// Regression test for #2: a style gallery label longer than its tile was painted at full width
+    /// and ran into the neighbouring tiles; it is now cut with an ellipsis to fit the tile.
+    #[test]
+    fn a_long_style_name_is_truncated_to_its_tile() {
+        let name = "An extraordinarily long custom style name that cannot fit a tile";
+        let (shapes, _) = run_gallery(Document::new(), gallery_style(name));
+        let label = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.job.text == name => Some(t),
+                _ => None,
+            })
+            .expect("the long style's label is painted");
+        // A tile is 74 points wide.
+        assert!(label.galley.size().x <= 74.0, "the label is {} points wide, wider than its 74-point tile", label.galley.size().x);
+        assert!(label.galley.elided, "the label is cut short with an ellipsis");
+    }
+
+    /// Regression test for #2: a style whose hanging indent is larger than its left indent previewed
+    /// with its first line starting off the tile's left edge; the first line now starts at the edge.
+    #[test]
+    fn a_hanging_indent_style_previews_from_the_tile_edge() {
+        let mut style = gallery_style("Hanging");
+        style.para.indent_left = Some(0.0);
+        style.para.indent_first = Some(-36.0);
+        let (_, images) = run_gallery(Document::new(), style);
+        // The style is the only one in the gallery: its preview is the picture of a tile's size (the other upload is egui's font texture).
+        let preview = images.iter().find(|i| (200..300).contains(&i.size[0]) && (20..60).contains(&i.size[1])).expect("the preview is rendered");
+        let [w, h] = preview.size;
+        let inked: Vec<bool> = (0..w).map(|x| (0..h).any(|y| preview.pixels.get(y * w + x).is_some_and(|p| p.a() > 0 && p.r() < 160))).collect();
+        let first = inked.iter().position(|&i| i).expect("the preview has text");
+        let last = inked.iter().rposition(|&i| i).unwrap_or(first);
+        // "AaBbCcDd" begins at the left margin (1 point) and is whole: it is about 60 points wide.
+        assert!(first < 6, "the first line starts off the tile's left edge (ink from column {first})");
+        assert!(last - first > 40, "the first line is cut off by the tile's left edge (ink {first}..{last})");
     }
 
     /// #663: gallery previews are dimmed in the dark theme, unless they show Switch Modes' dark

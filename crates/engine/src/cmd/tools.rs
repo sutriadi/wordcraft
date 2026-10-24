@@ -48,6 +48,7 @@ pub const AUTOCORRECT: &[(&str, &str)] = &[
     ("(tm)", "™"),
     ("...", "…"),
     ("->", "→"),
+    ("-->", "→"),
     ("<-", "←"),
     ("=>", "⇒"),
     (":)", "☺"),
@@ -112,6 +113,11 @@ pub struct AutoCorrectPrefs {
     pub exceptions_removed: Vec<String>,
     /// The user's words that keep two initial capitals (besides the built-in ones).
     pub initial_caps_exceptions: Vec<String>,
+    /// Undoing (or backspacing and retyping) an automatic sentence capital adds the word before
+    /// it to the exceptions (First Letter's "Automatically add words to list").
+    pub auto_add_first_letter: bool,
+    /// The same for undoing a TWo INitial CApitals fix (INitial CAps's switch).
+    pub auto_add_initial_caps: bool,
 }
 
 impl Default for AutoCorrectPrefs {
@@ -137,6 +143,8 @@ impl Default for AutoCorrectPrefs {
             exceptions: Vec::new(),
             exceptions_removed: Vec::new(),
             initial_caps_exceptions: Vec::new(),
+            auto_add_first_letter: true,
+            auto_add_initial_caps: true,
         }
     }
 }
@@ -212,6 +220,30 @@ impl AutoCorrectPrefs {
         v
     }
 
+    /// Add a First Letter exception (lowercase; one the built-in list has just stops being deleted).
+    fn add_exception(&mut self, e: String) {
+        if !plain_word(&e) {
+            return;
+        }
+        self.exceptions_removed.retain(|r| *r != e);
+        if !NOT_SENTENCE_END.contains(&e.as_str()) && !self.exceptions.contains(&e) && self.exceptions.len() < MAX_ENTRIES {
+            self.exceptions.push(e);
+        }
+    }
+
+    /// Add a word that keeps its two initial capitals.
+    fn add_initial_caps_exception(&mut self, w: &str) {
+        if !plain_word(w) {
+            return;
+        }
+        if !INITIAL_CAPS_EXCEPTIONS.contains(&w)
+            && !self.initial_caps_exceptions.iter().any(|e| e == w)
+            && self.initial_caps_exceptions.len() < MAX_ENTRIES
+        {
+            self.initial_caps_exceptions.push(w.to_string());
+        }
+    }
+
     /// Abbreviations after which a sentence doesn't end, lowercase.
     pub fn exception_list(&self) -> Vec<String> {
         let mut v: Vec<String> = NOT_SENTENCE_END
@@ -223,6 +255,50 @@ impl AutoCorrectPrefs {
         v.sort();
         v.dedup();
         v
+    }
+}
+
+/// Is `w` a word an exception list may hold: one short line, no spaces or object characters?
+fn plain_word(w: &str) -> bool {
+    !w.trim().is_empty() && w.chars().count() <= MAX_FROM && !w.contains(|c: char| c.is_whitespace() || c == '\u{FFFC}')
+}
+
+/// The newest automatic capitalisation (a sentence capital, a TWo INitial CApitals fix), kept so
+/// that undoing it, or backspacing it and typing the word again, makes an exception (#1857).
+#[derive(Clone, Debug)]
+pub struct AutoCap {
+    /// Undo steps pushed (ever) right after the change (`u64::MAX` until the caller has pushed its step).
+    pub(crate) depth: u64,
+    story: wordcraft_doc::StoryRef,
+    path: wordcraft_doc::Path,
+    /// Byte offset of the word in its paragraph.
+    start: usize,
+    /// The token before a sentence capital's word, lowercase ("there."); empty when none or when
+    /// the capital wasn't a sentence one.
+    prev: String,
+    /// The TWo INitial CApitals word as typed ("TWo").
+    two_caps: Option<String>,
+    /// The user backspaced into the word after the change.
+    backspaced: bool,
+}
+
+impl AutoCap {
+    pub(crate) fn add_exceptions(self, ac: &mut AutoCorrectPrefs) {
+        if ac.auto_add_first_letter && !self.prev.is_empty() {
+            ac.add_exception(self.prev);
+        }
+        if ac.auto_add_initial_caps
+            && let Some(w) = self.two_caps
+        {
+            ac.add_initial_caps_exception(&w);
+        }
+    }
+
+    /// A Backspace deleted `a..f`; it reached back over the capitalised word's first letter.
+    pub(crate) fn note_backspace(&mut self, a: &Pos, f: &Pos) {
+        if f.story == self.story && f.path == self.path && a.off <= self.start && f.off > self.start {
+            self.backspaced = true;
+        }
     }
 }
 
@@ -252,6 +328,8 @@ fn autocorrect_options(s: &mut Session, v: &Value) -> CmdResult {
         ("bullets", &mut ac.bullets),
         ("numbering", &mut ac.numbering),
         ("borderLines", &mut ac.border_lines),
+        ("autoAddFirstLetter", &mut ac.auto_add_first_letter),
+        ("autoAddInitialCaps", &mut ac.auto_add_initial_caps),
     ] {
         if let Some(b) = p::bool(v, k) {
             *f = b;
@@ -286,10 +364,7 @@ fn autocorrect_options(s: &mut Session, v: &Value) -> CmdResult {
         if bad(&e, MAX_FROM) || e.contains(char::is_whitespace) {
             return Err(CmdError::Params("an exception is one abbreviation, like \"approx.\"".into()));
         }
-        ac.exceptions_removed.retain(|r| *r != e);
-        if !NOT_SENTENCE_END.contains(&e.as_str()) && !ac.exceptions.contains(&e) && ac.exceptions.len() < MAX_ENTRIES {
-            ac.exceptions.push(e);
-        }
+        ac.add_exception(e);
     }
     if let Some(e) = p::str(v, "deleteException") {
         let e = e.trim().to_lowercase();
@@ -303,12 +378,7 @@ fn autocorrect_options(s: &mut Session, v: &Value) -> CmdResult {
         if bad(w, MAX_FROM) || w.contains(char::is_whitespace) {
             return Err(CmdError::Params("an INitial CAps exception is one word, like \"IDs\"".into()));
         }
-        if !INITIAL_CAPS_EXCEPTIONS.contains(&w)
-            && !ac.initial_caps_exceptions.iter().any(|e| e == w)
-            && ac.initial_caps_exceptions.len() < MAX_ENTRIES
-        {
-            ac.initial_caps_exceptions.push(w.to_string());
-        }
+        ac.add_initial_caps_exception(w);
     }
     if let Some(w) = p::str(v, "deleteInitialCapsException") {
         let w = w.trim();
@@ -331,6 +401,8 @@ fn autocorrect_options(s: &mut Session, v: &Value) -> CmdResult {
         "bullets": ac.bullets,
         "numbering": ac.numbering,
         "borderLines": ac.border_lines,
+        "autoAddFirstLetter": ac.auto_add_first_letter,
+        "autoAddInitialCaps": ac.auto_add_initial_caps,
         "entries": ac.list().into_iter().map(|(a, b, builtin)| json!({"from": a, "to": b, "builtIn": builtin})).collect::<Vec<_>>(),
         "user": ac.entries,
         "exceptions": ac.exception_list(),
@@ -366,7 +438,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .pure(),
         CommandSpec::new("tools.autocorrect", "AutoCorrect Options", "File › Options › Proofing", autocorrect_options)
             .params(
-                r#"{"enabled"?: bool (all of AutoCorrect), "replaceText"|"twoInitialCaps"|"capSentences"|"capCells"|"capDays"|"capsLock"|"smartQuotes"|"fractions"|"ordinals"|"dashes"|"links"|"bullets"|"numbering"|"borderLines"?: bool, "add"?: {"from": string, "to": string} (adds or replaces an entry), "delete"?: string (an entry's "from", built in or added), "addException"?: string, "deleteException"?: string, "addInitialCapsException"?: string (keeps TWo INitial CApitals, like "IDs"), "deleteInitialCapsException"?: string} → options, entries and exceptions"#,
+                r#"{"enabled"?: bool (all of AutoCorrect), "replaceText"|"twoInitialCaps"|"capSentences"|"capCells"|"capDays"|"capsLock"|"smartQuotes"|"fractions"|"ordinals"|"dashes"|"links"|"bullets"|"numbering"|"borderLines"?: bool, "autoAddFirstLetter"|"autoAddInitialCaps"?: bool (Automatically add words to the exception lists when an automatic capital is undone; default true), "add"?: {"from": string, "to": string} (adds or replaces an entry), "delete"?: string (an entry's "from", built in or added), "addException"?: string, "deleteException"?: string, "addInitialCapsException"?: string (keeps TWo INitial CApitals, like "IDs"), "deleteInitialCapsException"?: string} → options, entries and exceptions"#,
             )
             .pure(),
         CommandSpec::new("tools.customizeKeyboard", "Customize Keyboard", "File › Options", customize_keyboard)
@@ -388,12 +460,12 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("review.combine", "Combine", "Review › Compare", compare).params(COMPARE_PARAMS),
         CommandSpec::new("file.accessibility", "Check Accessibility", "Review › Accessibility", accessibility).pure(),
         CommandSpec::new("file.inspect", "Inspect Document", "File › Info", inspect_doc)
-            .params(r#"{"remove"?: ["comments", "revisions", "properties", "hidden", "headers"]} → {found: {comments, revisions, properties, hiddenText, hiddenCount, hidden: [{story: "body|header|footer|footnote|endnote|comment|textBox", part?, text}] (at most 1000), truncated, unsupported: [{story, object: "table|opaque", ..}] (hidden text not inspected: table styles, verbatim objects), headers}, removed, residual: [..] (hidden text a removal couldn't reach), removedNotes: [{kind, part, text}] (notes whose hidden reference was removed)}; whole hidden paragraphs go with their marks"#),
+            .params(r#"{"remove"?: ["comments", "revisions", "properties", "hidden", "headers"]} → {found: {comments, revisions, properties, hiddenText, hiddenCount, hidden: [{story: "body|header|footer|footnote|endnote|comment|textBox", part?, text}] (at most 1000), truncated, unsupported: [{story, object: "table|opaque", ..}] (hidden text not inspected: table styles, verbatim objects), headers}, removed, residual: [..] (hidden text a removal couldn't reach), removedNotes: [{kind, part, text}] (notes whose hidden reference was removed)}; whole hidden paragraphs go with their marks; the removals are refused while the document tracks changes"#),
         CommandSpec::new("file.protect", "Protect Document", "File › Info", |s, v| {
             let mode = p::str(v, "mode").unwrap_or("readOnly");
             s.run("review.restrict", &json!({"mode": mode}))
         })
-        .params(r#"{"mode": "none|readOnly|comments|trackedChanges"}"#),
+        .params(r#"{"mode": "none|readOnly|comments|trackedChanges"} (starting enforcement; "none" doesn't stop a protected document — use review.restrict {"stop": true})"#),
         CommandSpec::new("file.versions", "Version History", "File › Info", |s, v| {
             if let Some(label) = p::str(v, "save") {
                 s.versions.push((label.to_string(), super::now_iso(), s.doc.clone()));
@@ -403,8 +475,21 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             if let Some(i) = p::u64(v, "restore") {
                 let (_, _, d) = s.versions.get(i as usize).cloned().ok_or_else(|| CmdError::Params("no such version".into()))?;
+                // The restore replaces the whole document, including the content the protection
+                // kept read-only, so the protection is stopped first (with its password, when it
+                // has one) — a restore must not go around it.
+                super::protect::check_version_restore(s)?;
                 s.checkpoint("Restore Version");
+                // A snapshot's own protection is stale: it was taken at some earlier moment, and
+                // restoring it must not bring a protection back that the live document doesn't
+                // have (#1327 follow-up).
+                let protection = s.doc.settings.protection.clone();
+                let protect_hash = s.doc.settings.protect_hash.clone();
+                let protect_formatting = s.doc.settings.protect_formatting;
                 s.doc = d;
+                s.doc.settings.protection = protection;
+                s.doc.settings.protect_hash = protect_hash;
+                s.doc.settings.protect_formatting = protect_formatting;
                 s.touch();
                 s.clamp_selection();
             }
@@ -417,17 +502,20 @@ pub fn specs() -> Vec<CommandSpec> {
         .pure(),
         CommandSpec::new("file.newFromTemplate", "New from Template", "File › New", |s, v| {
             let path = p::req_str(v, "path")?;
-            let doc = crate::io::open_path(std::path::Path::new(path)).map_err(CmdError::Failed)?;
+            let mut doc = crate::io::open_path(std::path::Path::new(path)).map_err(CmdError::Failed)?;
+            // As in Word, the new document is attached to the template it came from (#2852).
+            doc.settings.attached_template = Some(path.to_string());
             s.set_document(doc);
             s.path = None;
             s.dirty = true;
             sel_result(s)
         })
-        .params(r#"{"path": string}"#)
+        .params(r#"{"path": string} → a new, untitled document from the template, attached to it"#)
         .pure(),
         CommandSpec::new("file.saveTemplate", "Save as Template", "File › Save As", |s, v| {
             let path = p::req_str(v, "path")?;
-            let path = if path.ends_with(".dotx") { path.to_string() } else { format!("{path}.dotx") };
+            // A .dotm keeps its name (#2852); anything else becomes a .dotx.
+            let path = if super::user_templates::is_template_name(path) { path.to_string() } else { format!("{path}.dotx") };
             crate::io::save_path(std::path::Path::new(&path), &s.doc).map_err(CmdError::Failed)?;
             Ok(json!({"path": path}))
         })
@@ -451,15 +539,16 @@ pub fn specs() -> Vec<CommandSpec> {
         })
         .pure(),
         CommandSpec::new("file.share", "Share", "File", |s, _| {
-            s.ui_requests.push(json!({"open": "saveAs"}));
+            s.push_ui_request(json!({"open": "saveAs"}));
             Ok(json!({"hint": "Save or export a copy (PDF, Word document) to share it."}))
         })
         .pure(),
-        CommandSpec::new("insert.quickParts", "Quick Parts", "Insert › Text", quick_parts)
-            .params(r#"{"save"?: name (from the selection), "insert"?: name, "delete"?: name} → list"#),
-        CommandSpec::new("insert.autoText", "AutoText", "Insert › Text › Quick Parts", quick_parts)
+        CommandSpec::new("insert.quickParts", "Quick Parts", "Insert › Text", |s, v| quick_parts(s, v, wordcraft_doc::QUICK_PARTS_GALLERY)).params(
+            r#"{"save"?: name (from the selection), "in"?: "document" (save into the document's own building blocks, kept in its file; else this session's), "insert"?: name, "delete"?: name} → {"parts": names (this session's, then the document's Quick Parts), "document": the document's Quick Parts}"#,
+        ),
+        CommandSpec::new("insert.autoText", "AutoText", "Insert › Text › Quick Parts", |s, v| quick_parts(s, v, wordcraft_doc::AUTO_TEXT_GALLERY))
             .key(super::non_mac("Alt+F3"))
-            .params(r#"{"save"?: name, "insert"?: name}"#),
+            .params(r#"{"save"?: name, "in"?: "document", "insert"?: name, "delete"?: name} → {"parts": names, "document": the document's AutoText}"#),
         CommandSpec::new("insert.docProperty", "Document Property", "Insert › Text › Quick Parts", |s, v| {
             let name = p::str(v, "name").unwrap_or("Title").to_string();
             let c = &s.doc.core;
@@ -556,14 +645,19 @@ pub fn specs() -> Vec<CommandSpec> {
         .params(r#"{"header"?: pt, "footer"?: pt}"#),
         CommandSpec::new("table.cellMargins", "Cell Margins", "Table Layout › Alignment", |s, v| {
             let Some((tp, _, _)) = s.sel.focus.path.cell() else { return Err(CmdError::Disabled("not in a table".into())) };
+            let story = s.sel.focus.story;
+            let current = {
+                let table = s.doc.table(story, &tp).ok_or_else(|| CmdError::Failed("no table".into()))?;
+                let style = table.props.style.as_deref().and_then(|id| s.doc.styles.table_style(id));
+                table.props.cell_margins.or(style.and_then(|st| st.parts.cell_margins)).unwrap_or([0.0, 5.4, 0.0, 5.4])
+            };
             let m = [
-                p::f32(v, "top").unwrap_or(0.0),
-                p::f32(v, "left").unwrap_or(5.4),
-                p::f32(v, "bottom").unwrap_or(0.0),
-                p::f32(v, "right").unwrap_or(5.4),
+                p::f32(v, "top").unwrap_or(current[0]),
+                p::f32(v, "left").unwrap_or(current[1]),
+                p::f32(v, "bottom").unwrap_or(current[2]),
+                p::f32(v, "right").unwrap_or(current[3]),
             ]
             .map(|x| x.clamp(0.0, 144.0));
-            let story = s.sel.focus.story;
             s.doc.table_mut(story, &tp)?.props.cell_margins = Some(m);
             for path in s.doc.para_paths(story).into_iter().filter(|p| p.0.starts_with(&tp.0) && p.0.len() > tp.0.len()) {
                 s.doc.para_mut(story, &path)?.touch();
@@ -626,7 +720,7 @@ pub fn specs() -> Vec<CommandSpec> {
         })
         .params(r#"{"format": "decimal|upperRoman|lowerLetter…", "text"?: "%1.", "start"?: n}"#),
         CommandSpec::new("review.language", "Language", "Review › Language", language).params(
-            r#"{"lang"?: "en-US|en-GB|pl-PL|fr-FR|…" (BCP 47; default en-US), "noProof"?: bool, "detect"?: bool (detect language automatically, a preference), "default"?: bool (also the document's default language)}"#,
+            r#"{"lang"?: "en-US|en-GB|pl-PL|fr-FR|…" (BCP 47; default en-US), "noProof"?: bool, "detect"?: bool (detect language automatically, a preference), "default"?: bool (also the document's default and the saved language for future blank documents)}"#,
         ),
         CommandSpec::new("review.showMarkup", "Show Markup", "Review › Tracking", |s, v| {
             s.view.show_markup = p::bool(v, "value").unwrap_or(!s.view.show_markup);
@@ -679,7 +773,8 @@ pub fn specs() -> Vec<CommandSpec> {
 }
 
 /// Set Proofing Language: the selection's language and "do not check spelling or grammar",
-/// or (`default`) the document's default language; `detect` is the per-user preference.
+/// or (`default`) the document's default and the saved language for future blank documents;
+/// `detect` is the per-user detection preference.
 /// Nothing at all sets US English, as before.
 fn language(s: &mut Session, v: &Value) -> CmdResult {
     let lang = match p::str(v, "lang") {
@@ -711,14 +806,18 @@ fn language(s: &mut Session, v: &Value) -> CmdResult {
     if lang.is_none() && no_proof.is_none() {
         return Ok(json!({"detect": s.prefs.detect_language}));
     }
-    super::format::apply(s, &|c| {
+    let result = super::format::apply(s, &|c| {
         if let Some(l) = &lang {
             c.lang = Some(l.clone());
         }
         if let Some(np) = no_proof {
             c.no_proof = Some(np);
         }
-    })
+    })?;
+    if p::bool(v, "default") == Some(true) {
+        s.prefs.default_language = lang;
+    }
+    Ok(result)
 }
 
 fn macros(s: &mut Session, v: &Value) -> CmdResult {
@@ -778,34 +877,49 @@ pub fn autocorrect_word(s: &mut Session, on_enter: bool) -> Result<(), CmdError>
     if word.is_empty() {
         return Ok(());
     }
+    // The word's language (run, paragraph style, document default) picks the replacement list
+    // (#835) and the case mapping (#1923). Text with no language at all is in the editing
+    // language (a Polish interface writes Polish), else English.
+    let lang: Option<String> = s.doc.para_at(&f).and_then(|p| {
+        let rc = s.doc.styles.resolve_char(p.props.style.as_deref(), p.props_of_char(start));
+        rc.lang.clone()
+    });
+    let lang = lang.or_else(|| s.editing_lang.clone());
+    let turkic = is_turkic(lang.as_deref());
     // TWo INitial CApitals and cAPS LOCK come first, so "TEh" is still a replacement's typo.
-    if let Some((at, reps)) = case_fix(&ac, &word) {
+    if let Some((at, reps)) = case_fix(&ac, &word, turkic) {
         let para = s.doc.para_mut(f.story, &f.path)?;
         let letters = word.get(at..).unwrap_or("").chars().take(reps.len()).collect::<String>();
         let mut end = start + at + letters.len();
         for (c, rep) in letters.chars().rev().zip(reps.iter().rev()) {
             let from = end.saturating_sub(c.len_utf8());
             if rep.chars().ne(std::iter::once(c)) {
-                let props = para.props_of_char(from).clone();
+                let props = para.props_of_char(from).clone().without_symbol();
                 para.delete(from, end)?;
                 para.insert_text(from, rep, &props)?;
             }
             end = from;
         }
+        s.autocap = Some(AutoCap {
+            depth: u64::MAX,
+            story: f.story,
+            path: f.path.clone(),
+            start,
+            prev: String::new(),
+            two_caps: (ac.two_initial_caps
+                && letters.chars().nth(1).is_some_and(char::is_uppercase)
+                && letters.chars().next().is_some_and(char::is_uppercase))
+            .then(|| letters.clone()),
+            backspaced: false,
+        });
         let fixed: String = reps.concat();
         f.off = (f.off + fixed.len()).saturating_sub(letters.len());
         s.sel = Selection::caret(f.clone());
         word = format!("{}{fixed}{}", word.get(..at).unwrap_or(""), word.get(at + letters.len()..).unwrap_or(""));
     }
-    // A whole-word replacement, else "wait..." → "wait…".
-    // The word's language (run, paragraph style, document default) picks the list (#835).
-    // Text with no language at all is in the editing language (a Polish interface writes Polish),
-    // else English. Proofing decides what is English the same way.
-    let english = s.doc.para_at(&f).is_none_or(|p| {
-        let rc = s.doc.styles.resolve_char(p.props.style.as_deref(), p.props_of_char(start));
-        let lang = rc.lang.as_deref().or(s.editing_lang.as_deref());
-        wordcraft_proof::ProofLang::from_tag(lang) == wordcraft_proof::ProofLang::En
-    });
+    // A whole-word replacement, else "wait..." → "wait…". Proofing decides what is English the
+    // same way (#835); every English (en-GB, en-CA…) counts (#1281).
+    let english = s.doc.para_at(&f).is_none_or(|_| wordcraft_proof::ProofLang::from_tag(lang.as_deref()).is_english());
     let found = if ac.replace_text { ac.replacement_in(&word, english) } else { None };
     let (from, rep) = match found {
         Some(r) => (start, Some(r)),
@@ -817,11 +931,13 @@ pub fn autocorrect_word(s: &mut Session, on_enter: bool) -> Result<(), CmdError>
         },
         None => (start, None),
     };
+    let replaced = rep.is_some();
     let mut caret = f.off;
     if let Some(rep) = rep {
         let end = start + word.len();
         let para = s.doc.para_mut(f.story, &f.path)?;
-        let props = para.props_of_char(from).clone();
+        // The replacement is text: a symbol it replaces doesn't give it its symbol font (#2036).
+        let props = para.props_of_char(from).clone().without_symbol();
         para.delete(from, end)?;
         para.insert_text(from, &rep, &props)?;
         caret = (f.off + rep.len()).saturating_sub(end - from);
@@ -865,20 +981,78 @@ pub fn autocorrect_word(s: &mut Session, on_enter: bool) -> Result<(), CmdError>
     } else {
         last
     };
-    let sentence = sentence_on && starts_sentence(before_word, &exceptions) && should_capitalize(first, next);
+    let mut sentence = sentence_on && starts_sentence(before_word, &exceptions) && should_capitalize(first, next);
+    let prev = if sentence { prev_token(before_word) } else { String::new() };
+    // Typing the word again after backspacing an automatic capital: the user doesn't want it
+    // (Word's "Automatically add words to list"); an exception, so no capital this time either.
+    if sentence
+        && !prev.is_empty()
+        && s.autocap.take_if(|c| c.backspaced && c.story == f.story && c.path == f.path && c.start == start && c.prev == prev).is_some()
+        && ac.auto_add_first_letter
+    {
+        s.prefs.autocorrect.add_exception(prev.clone());
+        sentence = false;
+    }
     let day = ac.cap_days && DAYS.contains(&first);
     if sentence || day {
         let para = s.doc.para_mut(f.story, &f.path)?;
         if let Some(c) = word.chars().next() {
-            let up: String = c.to_uppercase().collect();
-            let props = para.props_of_char(start).clone();
+            let up = upper_char(c, turkic);
+            let props = para.props_of_char(start).clone().without_symbol();
             para.delete(start, start + c.len_utf8())?;
             para.insert_text(start, &up, &props)?;
             let off = (caret + up.len()).saturating_sub(c.len_utf8());
-            s.sel = Selection::caret(Pos { off, ..f });
+            s.sel = Selection::caret(Pos { off, ..f.clone() });
+            if sentence && !prev.is_empty() && !replaced {
+                match s.autocap.as_mut().filter(|c| c.depth == u64::MAX) {
+                    Some(c) => c.prev = prev,
+                    None => {
+                        s.autocap = Some(AutoCap { depth: u64::MAX, story: f.story, path: f.path, start, prev, two_caps: None, backspaced: false })
+                    }
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// The lowercase token before a word that starts a sentence ("there." in "there. world"), as
+/// [`starts_sentence`] reads it; empty at the start of a paragraph.
+fn prev_token(before: &str) -> String {
+    let t = before.trim_end().trim_end_matches(|c: char| "\"'”’)]".contains(c));
+    // Only full stops: Word's exception was observed with "there." (`there?` isn't added).
+    if !t.ends_with('.') {
+        return String::new();
+    }
+    t.rsplit(char::is_whitespace).next().unwrap_or("").trim_start_matches(|c: char| "\"'“‘([".contains(c)).to_lowercase()
+}
+
+/// Turkish, Azerbaijani (and Crimean Tatar) map `i`/`İ` and `ı`/`I` as pairs (#1923).
+pub(crate) fn is_turkic(lang: Option<&str>) -> bool {
+    if wordcraft_proof::ProofLang::from_tag(lang) == wordcraft_proof::ProofLang::Tr {
+        return true; // tr, tur, any region, same normalisation as proofing
+    }
+    let Some(tag) = lang.map(str::trim) else { return false };
+    let primary = tag.split(['-', '_']).next().unwrap_or("");
+    ["az", "aze", "crh"].iter().any(|c| primary.eq_ignore_ascii_case(c))
+}
+
+/// A letter in capitals: `i` → `İ` in Turkic languages, otherwise the Unicode default.
+pub(crate) fn upper_char(c: char, turkic: bool) -> String {
+    if turkic && c == 'i' {
+        return "\u{130}".to_string();
+    }
+    c.to_uppercase().collect()
+}
+
+/// A letter in lowercase: `I` → `ı` in Turkic languages. `İ` is always the single letter `i`,
+/// never `i` plus a combining dot.
+pub(crate) fn lower_char(c: char, turkic: bool) -> String {
+    match c {
+        'I' if turkic => "\u{131}".to_string(),
+        '\u{130}' => "i".to_string(),
+        _ => c.to_lowercase().collect(),
+    }
 }
 
 /// Built-in words that keep their two initial capitals (plurals of two-letter abbreviations).
@@ -890,7 +1064,7 @@ const CAPS_LOCK_EXCEPTIONS: &[&str] = &["iOS", "mRNA", "tRNA", "rRNA", "cDNA", "
 /// The capitalisation fix for a finished word: TWo INitial CApitals ("WOrd" → "Word") or cAPS
 /// LOCK ("wORD" → "Word"). Returns the byte offset of the word's letters and each letter's
 /// replacement. Only words of three or more letters, optionally in quotes or brackets.
-fn case_fix(caps: &AutoCorrectPrefs, word: &str) -> Option<(usize, Vec<String>)> {
+fn case_fix(caps: &AutoCorrectPrefs, word: &str, turkic: bool) -> Option<(usize, Vec<String>)> {
     if !caps.two_initial_caps && !caps.caps_lock {
         return None;
     }
@@ -907,7 +1081,7 @@ fn case_fix(caps: &AutoCorrectPrefs, word: &str) -> Option<(usize, Vec<String>)>
         _ => return None,
     };
     let one = |c: char| c.to_string();
-    let lower = |c: char| c.to_lowercase().collect::<String>();
+    let lower = |c: char| lower_char(c, turkic);
     if caps.two_initial_caps
         && a.is_uppercase()
         && b.is_uppercase()
@@ -918,7 +1092,7 @@ fn case_fix(caps: &AutoCorrectPrefs, word: &str) -> Option<(usize, Vec<String>)>
         return Some((at, std::iter::once(one(a)).chain(std::iter::once(lower(b))).chain(more.iter().map(|&c| one(c))).collect()));
     }
     if caps.caps_lock && a.is_lowercase() && b.is_uppercase() && more.iter().all(|c| c.is_uppercase()) && !CAPS_LOCK_EXCEPTIONS.contains(&letters) {
-        let up = a.to_uppercase().collect::<String>();
+        let up = upper_char(a, turkic);
         return Some((at, std::iter::once(up).chain(std::iter::once(lower(b))).chain(more.iter().map(|&c| lower(c))).collect()));
     }
     None
@@ -1115,6 +1289,9 @@ fn compare(s: &mut Session, v: &Value) -> CmdResult {
         // The result is a new, untitled document: saving it never overwrites either file.
         s.path = None;
         s.file_name = None;
+        // Version snapshots belong to the document they were taken from, including when
+        // Compare creates an untitled result from the current document.
+        s.clear_versions();
     }
     s.sel = Selection::caret(s.doc.start_of(StoryRef::Body));
     Ok(json!({"changes": changes, "author": author, "notHonoured": not_honoured}))
@@ -1205,6 +1382,67 @@ fn lcs_ops<T: PartialEq>(a: &[T], b: &[T]) -> Vec<Op> {
     ops
 }
 
+/// How short an interior match can be, inside a run of edits, before it's folded into the
+/// surrounding delete/insert instead of staying its own little island of "same" text. Two short
+/// strings that happen to share a character in a different order (common with digits in dates,
+/// IDs, phone numbers) otherwise come out of `lcs_ops` as a true shortest edit script, but render
+/// as a "ransom note" of alternating single-character deletions and insertions where a reader
+/// (and Word) would expect one clean replacement.
+const NOISE_MATCH_LEN: usize = 1;
+
+/// Folds single-token matches that sit strictly inside a run of edits into the surrounding
+/// delete/insert, so a character-level diff doesn't fragment a replaced run. A matched run that
+/// opens or closes the whole sequence is the genuine common prefix/suffix `lcs_ops` already
+/// stripped before running its table, so it's left untouched regardless of length; only a short
+/// match produced by the table's own backtracking, which can only ever be interior, is a
+/// candidate.
+fn collapse_noise_matches(ops: &[Op]) -> Vec<Op> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Keep,
+        Fold,
+    }
+    let mut runs: Vec<(Op, usize, Kind)> = Vec::new();
+    let mut k = 0;
+    while k < ops.len() {
+        let op = ops[k];
+        let len = ops[k..].iter().take_while(|o| **o == op).count();
+        let kind = if op == Op::Same && k != 0 && k + len != ops.len() && len <= NOISE_MATCH_LEN { Kind::Fold } else { Kind::Keep };
+        runs.push((op, len, kind));
+        k += len;
+    }
+    if !runs.iter().any(|(_, _, kind)| *kind == Kind::Fold) {
+        return ops.to_vec();
+    }
+    let mut out = Vec::with_capacity(ops.len());
+    let mut i = 0;
+    while i < runs.len() {
+        if runs[i].0 == Op::Same && runs[i].2 == Kind::Keep {
+            out.extend(std::iter::repeat_n(Op::Same, runs[i].1));
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < runs.len() && !(runs[i].0 == Op::Same && runs[i].2 == Kind::Keep) {
+            i += 1;
+        }
+        let region = &runs[start..i];
+        if region.iter().any(|(_, _, kind)| *kind == Kind::Fold) {
+            // Flatten the region: every original character first (in its own order), then every
+            // revised character (in its own order) — one clean delete, one clean insert.
+            let dels: usize = region.iter().map(|(op, len, kind)| if *kind == Kind::Fold || *op == Op::Del { *len } else { 0 }).sum();
+            let inss: usize = region.iter().map(|(op, len, kind)| if *kind == Kind::Fold || *op == Op::Ins { *len } else { 0 }).sum();
+            out.extend(std::iter::repeat_n(Op::Del, dels));
+            out.extend(std::iter::repeat_n(Op::Ins, inss));
+        } else {
+            for (op, len, _) in region {
+                out.extend(std::iter::repeat_n(*op, *len));
+            }
+        }
+    }
+    out
+}
+
 /// Words with the spaces after them ("The ", "cat "), or single characters.
 fn tokens(s: &str, characters: bool) -> Vec<String> {
     if characters {
@@ -1229,6 +1467,10 @@ fn word_diff(a: &Paragraph, b: &Paragraph, ins: u32, del: u32, opts: &CompareOpt
     let chars = opts.characters && at.chars().count().max(bt.chars().count()) <= MAX_CHAR_DIFF;
     let (ta, tb) = (tokens(&at, chars), tokens(&bt, chars));
     let ops = lcs_ops(&ta.iter().map(|t| opts.key(t)).collect::<Vec<_>>(), &tb.iter().map(|t| opts.key(t)).collect::<Vec<_>>());
+    // Only at character granularity: a matched whole word almost never happens by coincidence,
+    // but a matched single character very often does (digits, punctuation), so only there does
+    // a short interior match need folding back into its surrounding edit.
+    let ops = if chars { collapse_noise_matches(&ops) } else { ops };
     let mut p = Paragraph::new();
     p.props = b.props.clone();
     let base = a.runs.first().map(|r| r.props.clone()).unwrap_or_default();
@@ -1263,6 +1505,13 @@ fn accessibility(s: &mut Session, _: &Value) -> CmdResult {
 fn inspect_doc(s: &mut Session, v: &Value) -> CmdResult {
     let remove: Vec<String> =
         v.get("remove").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    // The removals aren't tracked: they delete straight from the document, so on a document that
+    // tracks changes the text would go with no revision to show for it, and the revision trail
+    // would be broken behind the user's back. Refuse the whole removal instead of quietly
+    // untracking it. Reading the document (no `remove`) is always allowed.
+    if !remove.is_empty() && s.doc.settings.track_changes {
+        return Err(CmdError::Disabled("the document tracks changes: stop tracking before removing content".into()));
+    }
     let hidden = hidden_text(&s.doc);
     let report = json!({
         "comments": s.doc.comments.len(),
@@ -1552,25 +1801,66 @@ fn tables_hiding_text(doc: &Document, story: StoryRef, blocks: &wordcraft_doc::B
     }
 }
 
-fn quick_parts(s: &mut Session, v: &Value) -> CmdResult {
+/// Insert › Quick Parts and AutoText: this session's building blocks, and the document's own
+/// (`Document::glossary`, kept in its file) in `gallery`. A name is looked up in the session's
+/// first, then in the document's (`gallery` first).
+fn quick_parts(s: &mut Session, v: &Value, gallery: &str) -> CmdResult {
+    let in_document = p::str(v, "in") == Some("document");
     if let Some(name) = p::str(v, "save") {
         let (a, b) = s.sel.ordered();
         if a == b {
             return Err(CmdError::Params("select the content to save".into()));
         }
         let frag = s.doc.copy_range(&a, &b);
-        s.building_blocks.insert(name.to_string(), frag);
+        if in_document {
+            if name.trim().is_empty() {
+                return Err(CmdError::Params("a building block needs a name".into()));
+            }
+            let blocks: wordcraft_doc::Blocks = frag.blocks.into_iter().map(Arc::new).collect();
+            match s.doc.glossary.iter_mut().find(|e| e.name == name && e.gallery == gallery) {
+                Some(e) => e.blocks = blocks,
+                None => s.doc.glossary.push(wordcraft_doc::BuildingBlock {
+                    name: name.to_string(),
+                    gallery: gallery.to_string(),
+                    category: "General".into(),
+                    blocks,
+                    ..Default::default()
+                }),
+            }
+        } else {
+            s.building_blocks.insert(name.to_string(), frag);
+        }
     }
-    if let Some(name) = p::str(v, "delete") {
-        s.building_blocks.remove(name);
+    if let Some(name) = p::str(v, "delete")
+        && (in_document || s.building_blocks.remove(name).is_none())
+        && let Some(i) = document_entry(&s.doc, name, gallery)
+    {
+        s.doc.glossary.remove(i);
     }
     if let Some(name) = p::str(v, "insert") {
-        let frag = s.building_blocks.get(name).cloned().ok_or_else(|| CmdError::Params(format!("no Quick Part `{name}`")))?;
+        let frag = match s.building_blocks.get(name) {
+            Some(f) => f.clone(),
+            None => {
+                let e = document_entry(&s.doc, name, gallery).and_then(|i| s.doc.glossary.get(i));
+                let e = e.ok_or_else(|| CmdError::Params(format!("no Quick Part `{name}`")))?;
+                wordcraft_doc::edit::Fragment { blocks: e.blocks.iter().map(|b| (**b).clone()).collect(), parts: Default::default() }
+            }
+        };
         let at = delete_selection(s)?;
         let end = s.doc.insert_fragment(&at, &frag)?;
         s.sel = Selection::caret(end);
     }
-    Ok(json!({"parts": s.building_blocks.keys().collect::<Vec<_>>()}))
+    let document: Vec<&str> = s.doc.glossary.iter().filter(|e| e.gallery == gallery).map(|e| e.name.as_str()).collect();
+    let mut parts: Vec<&str> = s.building_blocks.keys().map(String::as_str).collect();
+    let mut seen: std::collections::HashSet<&str> = parts.iter().copied().collect();
+    parts.extend(document.iter().copied().filter(|n| seen.insert(n)));
+    Ok(json!({"parts": parts, "document": document}))
+}
+
+/// The index of the document's building block `name`, in `gallery` if there is one there.
+fn document_entry(doc: &Document, name: &str, gallery: &str) -> Option<usize> {
+    let g = &doc.glossary;
+    g.iter().position(|e| e.name == name && e.gallery == gallery).or_else(|| g.iter().position(|e| e.name == name))
 }
 
 fn hf_nav(s: &mut Session, dir: i32) -> CmdResult {
@@ -1654,7 +1944,7 @@ fn customize_keyboard(s: &mut Session, v: &Value) -> CmdResult {
     }
     out.insert("custom".into(), serde_json::to_value(&s.keymap).unwrap_or(Value::Null));
     if !asked {
-        s.ui_requests.push(json!({"open": "customizeKeyboard"}));
+        s.push_ui_request(json!({"open": "customizeKeyboard"}));
     }
     Ok(Value::Object(out))
 }
@@ -1663,7 +1953,7 @@ fn customize_keyboard(s: &mut Session, v: &Value) -> CmdResult {
 /// with no query, the Search box (`ui_requests` → the UI's command search).
 fn search_commands(s: &mut Session, v: &Value) -> CmdResult {
     let Some(query) = p::str(v, "query") else {
-        s.ui_requests.push(json!({"open": "commands"}));
+        s.push_ui_request(json!({"open": "commands"}));
         return Ok(json!({"matches": []}));
     };
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
@@ -1759,7 +2049,7 @@ fn customize_ribbon(s: &mut Session, v: &Value) -> CmdResult {
     out.insert("tabs".into(), serde_json::to_value(l.tabs().as_ref()).unwrap_or(Value::Null));
     out.insert("qat".into(), json!(l.qat()));
     if !asked {
-        s.ui_requests.push(json!({"open": "customizeRibbon"}));
+        s.push_ui_request(json!({"open": "customizeRibbon"}));
     }
     Ok(Value::Object(out))
 }
@@ -1797,6 +2087,18 @@ mod tests {
         let p = s.doc.body[0].as_para().unwrap();
         let deleted: String = p.run_ranges().filter(|(_, c)| c.del.is_some()).map(|(r, _)| p.text[r].to_string()).collect();
         assert_eq!(deleted, "u");
+        // Two dates that happen to share digits in a different order ("01.09.2026" vs
+        // "19.10.2026") must come out as one clean replacement, not a scrambled chain of
+        // single-character deletions and insertions wherever a digit coincidentally recurs.
+        let mut s = Session::new(Document::from_text("zawarta w dniu 01.09.2026 pomiędzy:"));
+        s.run("review.compare", &json!({"text": "zawarta w dniu 19.10.2026 pomiędzy:", "level": "character"})).unwrap();
+        let p = s.doc.body[0].as_para().unwrap();
+        let deleted: String = p.run_ranges().filter(|(_, c)| c.del.is_some()).map(|(r, _)| p.text[r].to_string()).collect();
+        let inserted: String = p.run_ranges().filter(|(_, c)| c.ins.is_some()).map(|(r, _)| p.text[r].to_string()).collect();
+        assert_eq!(deleted, "01.09");
+        assert_eq!(inserted, "19.10");
+        assert_eq!(p.run_ranges().filter(|(_, c)| c.del.is_some()).count(), 1, "one clean deleted run, not several scattered ones");
+        assert_eq!(p.run_ranges().filter(|(_, c)| c.ins.is_some()).count(), 1, "one clean inserted run, not several scattered ones");
         // Formatting differences become formatting changes.
         let mut s = Session::new(Document::from_text("Same words."));
         let mut rev = Document::from_text("Same words.");
@@ -1807,6 +2109,33 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(r["changes"], 1);
         assert!(s.doc.revisions.iter().any(|x| x.kind == RevisionKind::Format));
+    }
+
+    #[test]
+    fn collapse_noise_matches_merges_short_interior_runs_but_keeps_prefix_suffix() {
+        // "01.09" vs "19.10": a pure LCS finds a scrambled chain of single-character matches
+        // ('1', '.', '0') threaded through what a reader expects to be one clean replacement.
+        let ops = lcs_ops(&['0', '1', '.', '0', '9'], &['1', '9', '.', '1', '0']);
+        assert!(ops.contains(&Op::Same), "the raw LCS does find spurious matches here, or this test proves nothing");
+        assert_eq!(collapse_noise_matches(&ops), vec![Op::Del, Op::Del, Op::Del, Op::Del, Op::Del, Op::Ins, Op::Ins, Op::Ins, Op::Ins, Op::Ins]);
+        // A plain single-character replacement flanked by a real common prefix and suffix has no
+        // interior match to begin with (the DP's middle is pure delete/insert), so it's untouched.
+        let ops = lcs_ops(&['a', 'b', 'c', 'x', 'd', 'e', 'f'], &['a', 'b', 'c', 'y', 'd', 'e', 'f']);
+        assert_eq!(collapse_noise_matches(&ops), ops);
+    }
+
+    #[test]
+    fn compare_at_word_level_still_matches_a_whole_unchanged_word() {
+        // `collapse_noise_matches` only runs for character-level compares (wired up in
+        // `word_diff`): a single matched *word* between two edits is a real, meaningful match
+        // (unlike a single matched character), and must never be folded into a replacement.
+        let mut s = Session::new(Document::from_text("the cat sat"));
+        s.run("review.compare", &json!({"text": "a cat ran"})).unwrap();
+        let p = s.doc.body[0].as_para().unwrap();
+        assert!(
+            p.run_ranges().any(|(r, c)| c.del.is_none() && c.ins.is_none() && p.text[r].trim() == "cat"),
+            "the unchanged word must survive as plain text"
+        );
     }
 
     #[test]
@@ -1836,7 +2165,11 @@ mod tests {
         let mut s = Session::new(Document::from_text("locked"));
         s.run("review.restrict", &json!({"mode": "readOnly"})).unwrap();
         assert!(s.run("text.insert", &json!({"text": "x"})).is_err());
-        s.run("review.restrict", &json!({"mode": "none"})).unwrap();
+        // The "none" mode is the shorthand for stopping the protection, and it doesn't stop a
+        // protected document: only the explicit stop does (#1327 follow-up).
+        assert!(s.run("review.restrict", &json!({"mode": "none"})).is_err());
+        assert!(s.run("text.insert", &json!({"text": "x"})).is_err());
+        s.run("review.restrict", &json!({"stop": true})).unwrap();
         assert!(s.run("text.insert", &json!({"text": "x"})).is_ok());
     }
 
@@ -1865,5 +2198,41 @@ mod tests {
         s.run("review.language", &json!({"lang": "de-DE", "default": true})).unwrap();
         assert_eq!(s.doc.styles.default_chr.lang.as_deref(), Some("de-DE"));
         assert!(s.run("review.language", &json!({"lang": "<script>"})).is_err());
+    }
+
+    /// The inspector's removals delete straight from the document, so they aren't tracked: on a
+    /// document that tracks changes the text would go with no revision to show for it, and the
+    /// revision trail would be broken behind the user's back. The removal is refused instead,
+    /// and the document is left as it was.
+    #[test]
+    fn inspect_removals_are_refused_while_the_document_tracks_changes() {
+        let mut s = Session::new(Document::from_text("Visible text.\nHidden text."));
+        s.run("select.text", &json!({"text": "Hidden"})).unwrap();
+        s.run("format.hidden", &json!({"value": true})).unwrap();
+        // Tracking without Restrict Editing isolates the Inspector guard from the protected
+        // document check added separately in #3285.
+        s.run("review.trackChanges", &json!({"value": true})).unwrap();
+        assert!(s.doc.settings.track_changes, "the document doesn't track changes");
+        let before = s.doc.clone();
+        let err = s.run("file.inspect", &json!({"remove": ["hidden"]})).unwrap_err();
+        assert!(matches!(err, CmdError::Disabled(_)), "{err}");
+        assert_eq!(s.doc, before, "the document changed despite the refusal");
+        // Reading the document stays allowed.
+        let found = s.run("file.inspect", &json!({})).unwrap();
+        assert_eq!(found["found"]["hiddenText"], true, "{found}");
+    }
+
+    /// A document that doesn't track changes is inspected as before: the hidden text goes.
+    #[test]
+    fn inspect_removals_work_when_the_document_does_not_track_changes() {
+        let mut s = Session::new(Document::from_text("Visible text.\nHidden text."));
+        s.run("select.text", &json!({"text": "Hidden"})).unwrap();
+        s.run("format.hidden", &json!({"value": true})).unwrap();
+        assert!(!s.doc.settings.track_changes);
+        let out = s.run("file.inspect", &json!({"remove": ["hidden"]})).unwrap();
+        assert_eq!(out["residual"], json!([]), "{out}");
+        let text = s.doc.plain_text(StoryRef::Body);
+        assert!(!text.contains("Hidden"), "the hidden text is still there: {text}");
+        assert!(text.contains("Visible text."), "{text}");
     }
 }

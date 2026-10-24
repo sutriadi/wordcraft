@@ -226,7 +226,16 @@ fn apply_filter(s: &mut Session) {
     if m.rows.is_empty() {
         m.preview = false;
     }
-    refresh(s);
+    refresh_shown(s);
+}
+
+/// [`refresh`] for the non-mutating recipient-list commands: in a protected document the merge
+/// fields' shown results stay as they are, since these commands skip the protection checks and
+/// undo (Preview Results and the record buttons, which mutate, show the new list's values).
+fn refresh_shown(s: &mut Session) {
+    if !super::protect::enforced(&s.doc) {
+        refresh(s);
+    }
 }
 
 /// The canonical field name for `f` (any case), or a params error.
@@ -338,7 +347,8 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("mailings.editRecipients", "Edit Recipient List", "Mailings › Start Mail Merge", |s, v| {
             if v.get("rows").and_then(Value::as_array).is_some() {
                 // Edited records keep the list's filter and sort (rules on removed fields drop).
-                let (filter, sort) = (std::mem::take(&mut s.merge.filter), std::mem::take(&mut s.merge.sort));
+                // Copies, so a list that fails to load leaves the filter and sort as they were.
+                let (filter, sort) = (s.merge.filter.clone(), s.merge.sort.clone());
                 let r = recipients(s, &json!({"rows": v.get("rows"), "fields": v.get("fields")}))?;
                 s.merge.filter = filter;
                 s.merge.sort = sort;
@@ -429,6 +439,15 @@ pub fn specs() -> Vec<CommandSpec> {
         .when(has_recipients),
         CommandSpec::new("mailings.next", "Next Record", "Mailings › Preview Results", |s, _| step(s, 1)).when(has_recipients),
         CommandSpec::new("mailings.previous", "Previous Record", "Mailings › Preview Results", |s, _| step(s, -1)).when(has_recipients),
+        CommandSpec::new("mailings.first", "First Record", "Mailings › Preview Results", |s, _| go_to(s, 0)).when(has_recipients),
+        CommandSpec::new("mailings.last", "Last Record", "Mailings › Preview Results", |s, _| go_to(s, i64::MAX)).when(has_recipients),
+        CommandSpec::new("mailings.goToRecord", "Go to Record", "Mailings › Preview Results", |s, v| {
+            let n = v.get("record").and_then(|r| r.as_i64().or_else(|| r.as_str().and_then(|t| t.trim().parse().ok())));
+            let n = n.ok_or_else(|| CmdError::Params("`record` must be a record number (1 = the first)".into()))?;
+            go_to(s, n.saturating_sub(1))
+        })
+        .params(r#"{"record": n (1 = the first; past either end goes to the first or last record)}"#)
+        .when(has_recipients),
         CommandSpec::new("mailings.findRecipient", "Find Recipient", "Mailings › Preview Results", |s, v| {
             let q = p::req_str(v, "text")?.to_lowercase();
             let idx = s
@@ -454,9 +473,21 @@ pub fn specs() -> Vec<CommandSpec> {
         })
         .pure(),
         CommandSpec::new("mailings.finish", "Finish & Merge", "Mailings › Finish", finish)
-            .params(r#"{"path"?: string (save the merged document), "from"?: n, "to"?: n}"#)
+            .params(r#"{"path"?: string (save the merged document), "records"?: "all|current" (current: the previewed record; default all, or from/to), "from"?: n, "to"?: n (record numbers, 1 = the first)}"#)
             .key(super::non_mac("Alt+Shift+N"))
             .when(has_recipients),
+        CommandSpec::new("mailings.printDocuments", "Print Documents", "Mailings › Finish › Finish & Merge", |s, v| {
+            let mut v = v.clone();
+            if let Some(o) = v.as_object_mut() {
+                o.remove("path");
+            }
+            let r = finish(s, &v)?;
+            s.push_ui_request(json!({"open": "print"}));
+            Ok(r)
+        })
+        .params(r#"{"records"?: "all|current", "from"?: n, "to"?: n} (merges into a new document, as Finish & Merge does, and opens Print for it)"#)
+        .key(super::non_mac("Alt+Shift+M"))
+        .when(has_recipients),
         CommandSpec::new("mailings.envelopes", "Envelopes", "Mailings › Create", envelopes).params(
             r#"{"delivery": string, "return"?: string, "size"?: "Envelope #10|#9|Monarch|DL|C4|C5|C6|B5", "width"?: pt, "height"?: pt, "add"?: bool (add to this document instead of a new one)}"#,
         ),
@@ -604,11 +635,21 @@ fn recipients(s: &mut Session, v: &Value) -> CmdResult {
             let named = ext.as_deref().is_some_and(wordcraft_formats::sheet::is_extension);
             let text = wordcraft_formats::txt::is_text(&bytes);
             let spreadsheet = wordcraft_formats::sheet::detect(&bytes).is_some() || (named && !text);
-            if named && !spreadsheet && decode(&bytes, v)?.trim_start().starts_with('<') {
-                return Err(CmdError::Failed(
-                    "this spreadsheet file is a web page (HTML), not a workbook; open it in a spreadsheet program, save it as .xlsx or .csv and select it again"
-                        .into(),
-                ));
+            if named && !spreadsheet {
+                let text = decode(&bytes, v)?;
+                let text = text.trim_start().trim_start_matches('\u{feff}');
+                if text.starts_with("<?xml") {
+                    return Err(CmdError::Failed(
+                        "this spreadsheet file is an XML spreadsheet, not a workbook; open it in a spreadsheet program, save it as .xlsx or .csv and select it again"
+                            .into(),
+                    ));
+                }
+                if text.starts_with('<') {
+                    return Err(CmdError::Failed(
+                        "this spreadsheet file is a web page (HTML), not a workbook; open it in a spreadsheet program, save it as .xlsx or .csv and select it again"
+                            .into(),
+                    ));
+                }
             }
             if spreadsheet {
                 use wordcraft_formats::sheet::{Pick, read_rows, sheet_names};
@@ -647,7 +688,7 @@ fn recipients(s: &mut Session, v: &Value) -> CmdResult {
     s.merge.filter.clear();
     s.merge.sort.clear();
     s.merge.record = 0;
-    refresh(s);
+    refresh_shown(s);
     let mut r = json!({"fields": s.merge.headers, "records": s.merge.rows.len()});
     if !sheet.is_null() {
         r["sheet"] = sheet;
@@ -704,8 +745,13 @@ fn header_split(mut all: Vec<Vec<String>>, headers: bool) -> Result<(Vec<String>
 }
 
 fn step(s: &mut Session, d: i64) -> CmdResult {
+    go_to(s, (s.merge.record as i64).saturating_add(d))
+}
+
+/// Preview record `idx` (0-based), clamped to the list.
+fn go_to(s: &mut Session, idx: i64) -> CmdResult {
     let n = s.merge.rows.len().max(1) as i64;
-    s.merge.record = (s.merge.record as i64 + d).clamp(0, n - 1) as usize;
+    s.merge.record = idx.clamp(0, n - 1) as usize;
     s.merge.preview = true;
     refresh(s);
     Ok(json!({"record": s.merge.record + 1, "of": n}))
@@ -913,6 +959,23 @@ pub fn refresh(s: &mut Session) {
     s.touch();
 }
 
+/// The records Finish & Merge and Print Documents take (0-based, end exclusive): `records`
+/// all or current, or `from` and `to` by record number. A range with none is an error.
+pub fn merge_range(s: &Session, v: &Value) -> Result<(usize, usize), CmdError> {
+    let n = s.merge.rows.len();
+    let (from, to) = match p::str(v, "records").map(str::trim) {
+        Some("current") => (s.merge.record.min(n.saturating_sub(1)), s.merge.record.saturating_add(1).min(n)),
+        None | Some("all") => {
+            ((p::u64(v, "from").unwrap_or(1).max(1) as usize).saturating_sub(1), (p::u64(v, "to").unwrap_or(n as u64).min(n as u64)) as usize)
+        }
+        Some(_) => return Err(CmdError::Params("`records` must be all or current".into())),
+    };
+    if from >= to {
+        return Err(CmdError::Failed(format!("no records from {} to {to} (the list has {n})", from.saturating_add(1))));
+    }
+    Ok((from, to))
+}
+
 /// Most merged documents' worth of body blocks Finish & Merge builds.
 const MAX_MERGED_BLOCKS: usize = 200_000;
 
@@ -922,9 +985,7 @@ const MAX_MERGED_BLOCKS: usize = 200_000;
 /// are merged too: with merge fields in them, each letter becomes its own section with its own
 /// header/footer copies.
 fn finish(s: &mut Session, v: &Value) -> CmdResult {
-    let n = s.merge.rows.len();
-    let from = (p::u64(v, "from").unwrap_or(1).max(1) as usize).saturating_sub(1);
-    let to = (p::u64(v, "to").unwrap_or(n as u64).min(n as u64)) as usize;
+    let (from, to) = merge_range(s, v)?;
     let directory = s.merge.kind == "directory";
     let hf: Vec<u32> =
         header_footer_ids(&s.doc).into_iter().filter(|id| s.doc.story(StoryRef::Part(*id)).is_some_and(|b| has_merge_fields(b, 0))).collect();
@@ -1560,6 +1621,65 @@ mod tests {
         assert_eq!(s.doc.plain_text(StoryRef::Body), "Alpha / Beta\nGamma / ");
     }
 
+    /// #3028: First, Last and Go to Record move the preview; Finish & Merge and Print Documents
+    /// take all records, the current one, or a range by record number.
+    #[test]
+    fn record_navigation_and_merge_ranges() {
+        let names = ["Alpha", "Beta", "Gamma", "Delta"];
+        let fresh = || {
+            let mut s = Session::new(Document::new());
+            s.run("mailings.recipients", &json!({"rows": names.map(|n| json!({"Name": n}))})).unwrap();
+            s.run("mailings.start", &json!({"kind": "directory"})).unwrap();
+            s.run("mailings.insertField", &json!({"field": "Name"})).unwrap();
+            s
+        };
+        let mut s = fresh();
+        let body = |s: &Session| s.doc.plain_text(StoryRef::Body);
+        assert_eq!(s.run("mailings.last", &json!({})).unwrap(), json!({"record": 4, "of": 4}));
+        assert_eq!(body(&s), "Delta");
+        assert_eq!(s.run("mailings.first", &json!({})).unwrap()["record"], 1);
+        assert_eq!(body(&s), "Alpha");
+        assert_eq!(s.run("mailings.goToRecord", &json!({"record": 3})).unwrap()["record"], 3);
+        assert_eq!(body(&s), "Gamma");
+        assert_eq!(s.run("mailings.goToRecord", &json!({"record": " 2 "})).unwrap()["record"], 2);
+        // Past either end: the last or first record, as the step buttons do.
+        assert_eq!(s.run("mailings.goToRecord", &json!({"record": 1141})).unwrap()["record"], 4);
+        assert_eq!(s.run("mailings.goToRecord", &json!({"record": -5})).unwrap()["record"], 1);
+        for bad in [json!({}), json!({"record": "two"}), json!({"record": 2.5})] {
+            assert!(matches!(s.run("mailings.goToRecord", &bad), Err(CmdError::Params(_))), "{bad}");
+        }
+
+        s.run("mailings.goToRecord", &json!({"record": 3})).unwrap();
+        assert_eq!(s.run("mailings.finish", &json!({"records": "current"})).unwrap()["records"], 1);
+        assert_eq!(body(&s), "Gamma");
+        let mut s = fresh();
+        assert_eq!(s.run("mailings.finish", &json!({"from": 2, "to": 3})).unwrap()["records"], 2);
+        assert_eq!(body(&s), "Beta\nGamma");
+        let mut s = fresh();
+        assert_eq!(s.run("mailings.finish", &json!({"records": "all", "from": 3, "to": 99})).unwrap()["records"], 2);
+        assert_eq!(body(&s), "Gamma\nDelta");
+        // An empty range is refused and the document is kept, not replaced by an empty one.
+        let mut s = fresh();
+        let before = body(&s);
+        for bad in [json!({"from": 3, "to": 2}), json!({"from": 5}), json!({"records": "some"})] {
+            assert!(s.run("mailings.finish", &bad).is_err(), "{bad}");
+            assert_eq!(body(&s), before, "{bad}");
+        }
+        let e = s.run("mailings.finish", &json!({"from": 5})).unwrap_err().to_string();
+        assert_eq!(e, "no records from 5 to 4 (the list has 4)", "a plain message for the dialog");
+
+        // Print Documents merges the same way, then asks the interface for Print.
+        let mut s = fresh();
+        s.ui_requests.clear();
+        assert_eq!(s.run("mailings.printDocuments", &json!({"from": 4, "path": "ignored.docx"})).unwrap()["records"], 1);
+        assert_eq!(body(&s), "Delta");
+        assert!(s.ui_requests.contains(&json!({"open": "print"})));
+        let mut s = fresh();
+        s.ui_requests.clear();
+        assert!(s.run("mailings.printDocuments", &json!({"from": 9})).is_err());
+        assert!(s.ui_requests.is_empty(), "nothing to print, no Print dialog");
+    }
+
     /// #429: an IF rule shows its true / false text in Preview Results, as Finish & Merge does.
     #[test]
     fn if_rule_previews_its_result() {
@@ -1703,6 +1823,10 @@ mod tests {
         assert_eq!(r["fields"], json!(["Name", "City"]));
         let e = s.run("mailings.recipients", &json!({"path": "export.xls", "data": b64(b"<html><table><tr><td>x</td></tr></table></html>")}));
         assert!(matches!(e, Err(CmdError::Failed(m)) if m.contains("web page")));
+        // #1287: an Excel 2003 XML spreadsheet named .xls says what it is.
+        let xml = b"<?xml version=\"1.0\"?>\n<Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\"></Workbook>";
+        let e = s.run("mailings.recipients", &json!({"path": "export.xls", "data": b64(xml)}));
+        assert!(matches!(e, Err(CmdError::Failed(m)) if m.contains("XML spreadsheet")));
         assert!(
             s.run("mailings.recipients", &json!({"path": "junk.xls", "data": b64(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 1])})).is_err()
         );
@@ -1809,6 +1933,21 @@ mod tests {
         s.run("mailings.editRecipients", &json!({"fields": ["Name"], "rows": [["X"], ["Y"]]})).unwrap();
         assert!(s.merge.filter.is_empty());
         assert_eq!(names(&s), ["X", "Y"]);
+    }
+
+    /// #1287: an Edit Recipient List that fails to load keeps the list's filter and sort.
+    #[test]
+    fn failed_edit_recipients_keeps_filter_and_sort() {
+        let mut s = people();
+        s.run("mailings.filterRecipients", &json!({"rules": [{"field": "Age", "op": "greater", "value": 20}], "sort": [{"field": "City"}]})).unwrap();
+        let before = names(&s);
+        // Array rows without `fields` fail to load.
+        let e = s.run("mailings.editRecipients", &json!({"rows": [["X", "Y"]]}));
+        assert!(matches!(e, Err(CmdError::Params(_))));
+        assert_eq!(s.merge.filter.len(), 1);
+        assert_eq!(s.merge.sort.len(), 1);
+        assert_eq!(names(&s), before);
+        assert_eq!(s.run("mailings.editRecipients", &json!({})).unwrap()["rules"].as_array().map(Vec::len), Some(1));
     }
 
     /// Review fix for #885: sorting a column that mixes numbers and text is a total order

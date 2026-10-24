@@ -25,6 +25,8 @@ permissions:
 
 env:
   NDK_VERSION: 28.0.13004108
+  # Shown to users as the version name; the Play versionCode is the run number.
+  APP_VERSION: ${{ inputs.version || '0.1.0' }}
 
 jobs:
   apk:

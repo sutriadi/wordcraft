@@ -27,6 +27,10 @@ env:
   NDK_VERSION: 28.0.13004108
   # Shown to users as the version name; the Play versionCode is the run number.
   APP_VERSION: ${{ inputs.version || '0.1.0' }}
+  # Translations and spelling/hyphenation data live in storytold/craft-i18n (an optional build input,
+  # pinned by craft-i18n.rev). REQUIRED makes the build fail instead of silently shipping English only.
+  CRAFT_I18N_DIR: ${{ github.workspace }}/craft-i18n
+  CRAFT_I18N_REQUIRED: "1"
 
 jobs:
   apk:
@@ -34,6 +38,17 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - name: Read the pinned craft-i18n revision
+        id: i18n
+        run: echo "sha=$(tr -d '[:space:]' < craft-i18n.rev)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out craft-i18n (translations and language data)
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-i18n
+          ref: ${{ steps.i18n.outputs.sha }}
+          path: craft-i18n
 
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -70,7 +70,7 @@ pub struct LangInfo {
 
 /// The languages WordCraft offers, when their catalogs are embedded. English first: it is the
 /// fallback and the source language.
-pub static LANGUAGES: [LangInfo; 28] = [
+pub static LANGUAGES: [LangInfo; 29] = [
     LangInfo { code: "en", prefer_hans: false, editing_lang: None },
     // Simplified Chinese; `zh`, `zh-CN`, `zh-SG` and `zh-Hans-*` resolve here (the crate's matching).
     LangInfo { code: "zh-hans", prefer_hans: true, editing_lang: None },
@@ -114,6 +114,8 @@ pub static LANGUAGES: [LangInfo; 28] = [
     LangInfo { code: "bg", prefer_hans: false, editing_lang: None },
     // Vietnamese; `vi`, `vi-VN` and `vi_VN.UTF-8` resolve here.
     LangInfo { code: "vi", prefer_hans: false, editing_lang: None },
+    // Indonesian; `id`, `id-ID` and `id_ID.UTF-8` resolve here.
+    LangInfo { code: "id", prefer_hans: false, editing_lang: None },
     // Swedish; sv, sv-SE, sv-FI and sv_SE.UTF-8 resolve here.
     LangInfo { code: "sv", prefer_hans: false, editing_lang: None },
     // Croatian; `hr`, `hr-HR` and `hr_HR.UTF-8` resolve here.

@@ -7034,7 +7034,7 @@ dependencies = [
 
 [[package]]
 name = "wordcraft-android"
-version = "0.15.1"
+version = "0.18.1"
 dependencies = [
  "android-activity",
  "android_logger",

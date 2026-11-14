@@ -136,12 +136,18 @@ jobs:
             echo "::warning::No keystore secrets set: the AAB is UNSIGNED and Google Play will reject it."
             echo "AAB_SIGNED=false" >> "$GITHUB_ENV"
           fi
-          gradle :app:bundleRelease --no-daemon
+          gradle :app:bundleRelease :app:assembleRelease --no-daemon
 
       - uses: actions/upload-artifact@v4
         with:
           name: wordcraft-android-aab
           path: apps/wordcraft-android/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wordcraft-android-release-apk
+          path: apps/wordcraft-android/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
       - name: Publish GitHub release
@@ -157,7 +163,16 @@ jobs:
           TAG="android-v${VERSION}"
           APK="wordcraft-android-${VERSION}-debug.apk"
           cp apps/wordcraft-android/android/app/build/outputs/apk/debug/app-debug.apk "$APK"
-          gh release create "$TAG" "$APK" --target "$GITHUB_SHA" \
-            --title "WordCraft for Android ${VERSION} (debug build)" \
+          FILES=("$APK")
+          NOTES="Early build for tablets and foldables, not yet tested on a device. Based on WordCraft by Brandon Thomas (MIT or Apache-2.0). The debug APK is signed with a debug key. The release APK is signed with the upload key; Android will not install one over the other, so uninstall first when switching."
+          if [ "${AAB_SIGNED:-false}" = "true" ]; then
+            RAPK="wordcraft-android-${VERSION}-release.apk"
+            cp apps/wordcraft-android/android/app/build/outputs/apk/release/app-release.apk "$RAPK"
+            FILES+=("$RAPK")
+          else
+            NOTES="$NOTES No keystore secrets were set, so there is no release APK in this release."
+          fi
+          gh release create "$TAG" "${FILES[@]}" --target "$GITHUB_SHA" \
+            --title "WordCraft for Android ${VERSION}" \
             --prerelease \
-            --notes "Early debug build for tablets and foldables. Signed with a debug key and not yet tested on a device. Based on WordCraft by Brandon Thomas (MIT or Apache-2.0)."
+            --notes "$NOTES"

@@ -1,5 +1,4 @@
 //! WordCraft geometry and units.
-//!
 //! Layout works in **points** (1/72 inch, `f32`). File formats use other units: OOXML uses
 //! twentieths of a point (twips) for most lengths, half-points for font sizes, eighths of a point
 //! for borders and English Metric Units (EMU, 914 400 per inch) for drawings. The conversions live
@@ -8,8 +7,12 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "image")]
+pub mod picture;
 mod region;
 pub use region::Region;
+mod pixels;
+pub use pixels::{MAX_DECODED_BYTES, MAX_RASTER_PIXELS, decode_fits, decode_peak_fits, fit_pixels, rgba_bytes, rgba_fits};
 
 /// Points per inch.
 pub const PT_PER_IN: f32 = 72.0;
@@ -21,26 +24,32 @@ pub const EMU_PER_PT: f32 = 12_700.0;
 pub const PT_PER_CM: f32 = 72.0 / 2.54;
 
 /// Twips → points.
+#[expect(clippy::cast_precision_loss, reason = "The f32 return type intentionally rounds i64 inputs to f32 precision.")]
 pub fn twips(v: i64) -> f32 {
     v as f32 / TWIPS_PER_PT
 }
 /// Points → twips (rounded).
+#[expect(clippy::cast_possible_truncation, reason = "The value is rounded first; Rust's float-to-integer cast saturates outside the i64 range.")]
 pub fn to_twips(pt: f32) -> i64 {
     finite(pt * TWIPS_PER_PT).round() as i64
 }
 /// EMU → points.
+#[expect(clippy::cast_precision_loss, reason = "The f32 return type intentionally rounds i64 inputs to f32 precision.")]
 pub fn emu(v: i64) -> f32 {
     v as f32 / EMU_PER_PT
 }
 /// Points → EMU (rounded).
+#[expect(clippy::cast_possible_truncation, reason = "The value is rounded first; Rust's float-to-integer cast saturates outside the i64 range.")]
 pub fn to_emu(pt: f32) -> i64 {
-    (finite(pt) as f64 * EMU_PER_PT as f64).round() as i64
+    (f64::from(finite(pt)) * f64::from(EMU_PER_PT)).round() as i64
 }
 /// Half-points (OOXML font sizes) → points.
+#[expect(clippy::cast_precision_loss, reason = "The f32 return type intentionally rounds i64 inputs to f32 precision.")]
 pub fn half_points(v: i64) -> f32 {
     v as f32 / 2.0
 }
 /// Points → half-points (rounded).
+#[expect(clippy::cast_possible_truncation, reason = "The value is rounded first; Rust's float-to-integer cast saturates outside the i64 range.")]
 pub fn to_half_points(pt: f32) -> i64 {
     (finite(pt) * 2.0).round() as i64
 }
@@ -119,8 +128,7 @@ pub fn parse_measure(s: &str, default: Unit) -> Option<f32> {
         "cm" => PT_PER_CM,
         "mm" => PT_PER_CM / 10.0,
         "pt" | "pts" | "point" | "points" => 1.0,
-        "pi" | "pc" | "pica" | "picas" => 12.0,
-        "li" | "line" | "lines" => 12.0,
+        "pi" | "pc" | "pica" | "picas" | "li" | "line" | "lines" => 12.0,
         "px" => 0.75,
         _ => return None,
     };
@@ -194,7 +202,7 @@ pub fn normalize_degrees(deg: f32) -> f32 {
 }
 
 /// How a drawing is turned about its centre: mirrored first (`flip_h` left to right, `flip_v` top
-/// to bottom), then rotated `deg` degrees clockwise (page space, y down), as DrawingML's `a:xfrm`
+/// to bottom), then rotated `deg` degrees clockwise (page space, y down), as `DrawingML`'s `a:xfrm`
 /// `flipH`, `flipV` and `rot` say (ECMA-376 §20.1.7.6).
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Spin {
@@ -215,7 +223,7 @@ impl Spin {
     }
 
     /// The linear part (a, b, c, d: x' = a·x + c·y, y' = b·x + d·y).
-    fn linear(&self) -> [f32; 4] {
+    fn linear(self) -> [f32; 4] {
         let r = normalize_degrees(self.deg).to_radians();
         let (s, c) = r.sin_cos();
         let fx = if self.flip_h { -1.0 } else { 1.0 };
@@ -233,17 +241,17 @@ impl Spin {
 
     /// Where point (`x`, `y`) goes when turned about (`cx`, `cy`).
     pub fn apply(&self, cx: f32, cy: f32, x: f32, y: f32) -> (f32, f32) {
-        let [a, b, c, d] = self.linear();
-        let (u, v) = (x - cx, y - cy);
-        (cx + a * u + c * v, cy + b * u + d * v)
+        let [x_from_x, y_from_x, x_from_y, y_from_y] = self.linear();
+        let (relative_x, relative_y) = (x - cx, y - cy);
+        (cx + x_from_x * relative_x + x_from_y * relative_y, cy + y_from_x * relative_x + y_from_y * relative_y)
     }
 
     /// The point that [`Spin::apply`] takes to (`x`, `y`).
     pub fn unapply(&self, cx: f32, cy: f32, x: f32, y: f32) -> (f32, f32) {
         // The linear part is orthogonal: its inverse is its transpose.
-        let [a, b, c, d] = self.linear();
-        let (u, v) = (x - cx, y - cy);
-        (cx + a * u + b * v, cy + c * u + d * v)
+        let [x_from_x, y_from_x, x_from_y, y_from_y] = self.linear();
+        let (relative_x, relative_y) = (x - cx, y - cy);
+        (cx + x_from_x * relative_x + y_from_x * relative_y, cy + x_from_y * relative_x + y_from_y * relative_y)
     }
 
     /// The axis-aligned box `r` covers once turned about its centre.
@@ -254,10 +262,10 @@ impl Spin {
 
     /// The width and height of the box a `w` × `h` rectangle covers once turned.
     pub fn extent(&self, w: f32, h: f32) -> (f32, f32) {
-        let (w, h) = (finite(w).abs(), finite(h).abs());
-        let r = normalize_degrees(self.deg).to_radians();
-        let (s, c) = (r.sin().abs(), r.cos().abs());
-        (w * c + h * s, w * s + h * c)
+        let (width, height) = (finite(w).abs(), finite(h).abs());
+        let radians = normalize_degrees(self.deg).to_radians();
+        let (sine, cosine) = (radians.sin().abs(), radians.cos().abs());
+        (width * cosine + height * sine, width * sine + height * cosine)
     }
 
     /// This spin applied inside `outer` (a group member's own spin within its group's): the one
@@ -294,17 +302,56 @@ pub fn paper_name(w: f32, h: f32) -> Option<&'static str> {
         .map(|(n, _, _)| *n)
 }
 
+/// The standard paper size named `name` (case-insensitive), as (name, width, height) in points.
+pub fn paper_by_name(name: &str) -> Option<(&'static str, f32, f32)> {
+    let name = name.trim();
+    PAPER_SIZES.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(name)).copied()
+}
+
+/// How a page is placed on other paper when printing with "Scale to paper size" (#2108).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaperFit {
+    /// The sheet, turned to the page's orientation (points).
+    pub paper_w: f32,
+    pub paper_h: f32,
+    /// Page points to sheet points.
+    pub k: f32,
+    /// Where the page's top-left corner lands on the sheet (the page is centred).
+    pub dx: f32,
+    pub dy: f32,
+}
+
+/// Fits a `page_w` × `page_h` page onto `paper_w` × `paper_h` paper: the paper is turned to the
+/// page's orientation, the page is scaled up or down by one factor to fill it and centred, as
+/// Word's Pages per sheet › Scale to paper size does. Degenerate or non-finite sizes give the
+/// page as it is (scale 1 on paper of its own size).
+pub fn fit_to_paper(page_w: f32, page_h: f32, paper_w: f32, paper_h: f32) -> PaperFit {
+    let ok = |v: f32| v.is_finite() && v >= 1.0;
+    let as_is = PaperFit { paper_w: page_w, paper_h: page_h, k: 1.0, dx: 0.0, dy: 0.0 };
+    if !(ok(page_w) && ok(page_h) && ok(paper_w) && ok(paper_h)) {
+        return as_is;
+    }
+    let (short, long) = (paper_w.min(paper_h), paper_w.max(paper_h));
+    let (pw, ph) = if page_w > page_h { (long, short) } else { (short, long) };
+    let k = (pw / page_w).min(ph / page_h);
+    let (dx, dy) = ((pw - page_w * k) / 2.0, (ph - page_h * k) / 2.0);
+    if !(k.is_finite() && k > 0.0 && dx.is_finite() && dy.is_finite()) {
+        return as_is;
+    }
+    PaperFit { paper_w: pw, paper_h: ph, k, dx, dy }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn unit_round_trips() {
-        assert_eq!(twips(1440), 72.0);
+        assert_eq!(twips(1440).to_bits(), 72.0f32.to_bits());
         assert_eq!(to_twips(72.0), 1440);
-        assert_eq!(emu(914_400), 72.0);
+        assert_eq!(emu(914_400).to_bits(), 72.0f32.to_bits());
         assert_eq!(to_emu(72.0), 914_400);
-        assert_eq!(half_points(24), 12.0);
+        assert_eq!(half_points(24).to_bits(), 12.0f32.to_bits());
         assert_eq!(to_half_points(10.5), 21);
         assert_eq!(to_twips(f32::NAN), 0);
     }
@@ -342,6 +389,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_measure_rejects_overflow_to_infinity() {
+        // Finite inputs whose scaled result overflows `f32` must be rejected,
+        // never returned as an infinite measurement (#1359).
+        let e38 = "100000000000000000000000000000000000000"; // 1e38, finite
+        for s in [
+            format!("{e38}\""),
+            format!("{e38} in"),
+            format!("{e38} cm"),
+            format!("{e38} pi"),
+            format!("{e38} li"),
+            format!("-{e38} in"),
+            e38.to_string(), // bare number in the default unit (inches below)
+        ] {
+            assert_eq!(parse_measure(&s, Unit::Inches), None, "input: {s}");
+        }
+        // Millimetres scale by ~2.83, so 2e38 is needed to overflow.
+        let two_e38 = "200000000000000000000000000000000000000";
+        assert_eq!(parse_measure(&format!("{two_e38} mm"), Unit::Inches), None);
+        // A large result that stays finite is still accepted, and points
+        // scale by 1, so a finite input in points stays finite.
+        let big = parse_measure("1000000000000000000000000000000 in", Unit::Points).unwrap();
+        assert!(big.is_finite() && big > 0.0);
+        assert!(parse_measure(&format!("{e38} pt"), Unit::Inches).unwrap().is_finite());
+    }
+
+    #[test]
     fn formats_measurements() {
         assert_eq!(Unit::Inches.format(72.0), "1\"");
         assert_eq!(Unit::Inches.format(90.0), "1.25\"");
@@ -360,7 +433,7 @@ mod tests {
         assert!(a.intersects(&b));
         assert_eq!(a.union(&b), Rect::new(0.0, 0.0, 15.0, 15.0));
         assert!(a.contains(Point::new(5.0, 5.0)));
-        assert_eq!(Rect::new(0.0, 0.0, -5.0, f32::NAN).w, 0.0);
+        assert_eq!(Rect::new(0.0, 0.0, -5.0, f32::NAN).w.to_bits(), 0.0f32.to_bits());
         assert_eq!(a.inset(1.0, 2.0, 3.0, 4.0), Rect::new(1.0, 2.0, 6.0, 4.0));
     }
 
@@ -369,5 +442,37 @@ mod tests {
         assert_eq!(paper_name(612.0, 792.0), Some("Letter"));
         assert_eq!(paper_name(792.0, 612.0), Some("Letter"));
         assert_eq!(paper_name(100.0, 100.0), None);
+        assert_eq!(paper_by_name(" a4 ").map(|p| p.0), Some("A4"));
+        assert_eq!(paper_by_name("Legal").map(|p| (p.1, p.2)), Some((612.0, 1008.0)));
+        assert_eq!(paper_by_name("Quarto"), None);
+    }
+
+    /// Scale to paper size (#2108): one factor, centred, paper turned to the page's orientation.
+    #[test]
+    fn pages_fit_other_paper() {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+        // Letter on A4: narrower paper, so the width decides and the page is centred vertically.
+        let f = fit_to_paper(612.0, 792.0, 595.28, 841.89);
+        assert!(close(f.paper_w, 595.28) && close(f.paper_h, 841.89));
+        assert!(close(f.k, 595.28 / 612.0) && close(f.dx, 0.0));
+        assert!(close(f.dy, (841.89 - 792.0 * f.k) / 2.0) && f.dy > 0.0);
+        // A4 on Legal: the width decides; A5 on A4 is enlarged.
+        assert!(close(fit_to_paper(595.28, 841.89, 612.0, 1008.0).k, 612.0 / 595.28));
+        assert!(close(fit_to_paper(419.53, 595.28, 595.28, 841.89).k, 595.28 / 419.53));
+        // A landscape page gets landscape paper whichever way the paper is given.
+        let l = fit_to_paper(792.0, 612.0, 595.28, 841.89);
+        assert!(close(l.paper_w, 841.89) && close(l.paper_h, 595.28));
+        assert!(close(l.k, 595.28 / 612.0) && l.dx > 0.0 && close(l.dy, 0.0));
+        // The same paper is the page as it is.
+        let same = fit_to_paper(612.0, 792.0, 612.0, 792.0);
+        assert!(close(same.k, 1.0) && close(same.dx, 0.0) && close(same.dy, 0.0));
+        // Hostile sizes never produce NaN or infinite scales.
+        for (a, b, c, d) in
+            [(f32::NAN, 792.0, 595.0, 842.0), (612.0, 0.0, 595.0, 842.0), (612.0, 792.0, f32::INFINITY, 842.0), (612.0, 792.0, -5.0, 842.0)]
+        {
+            let f = fit_to_paper(a, b, c, d);
+            assert_eq!((f.k, f.dx, f.dy), (1.0, 0.0, 0.0));
+        }
+        assert!(fit_to_paper(1.0, 1.0, f32::MAX, f32::MAX).k.is_finite());
     }
 }

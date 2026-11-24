@@ -50,8 +50,13 @@ zbus = "=5.19.0"
 # Comment times in the user's own time zone (`local_time.rs`); the web app asks the browser.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-# The native file dialogs (rfd) and the self-updater (ureq, ring) do not build for wasm32.
-craft = { workspace = true, features = ["dialogs", "update"] }
+# The self-updater (ureq, ring) does not build for wasm32.
+craft = { workspace = true, features = ["update"] }
+
+# The native file dialogs (rfd) build for neither wasm32 nor Android (rfd has no Android backend; the Android
+# shell's file service goes through the Storage Access Framework instead).
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+craft = { workspace = true, features = ["dialogs"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # The browser clock (`SystemTime::now()`/`Instant::now()` panic on wasm32).

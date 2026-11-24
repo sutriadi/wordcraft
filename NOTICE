@@ -172,6 +172,12 @@ cleanup. WordCraft enables only writing; PDF import and its image decoders are n
 
 No Microsoft, Adobe, Avid or Autodesk icons, images, templates or artwork are included.
 
+Modified version
+----------------
+"Si Kantor: Tulis" (Android app, `apps/wordcraft-android`) is a modified version of WordCraft by
+the ArtCraft team and community, published independently by sutriadi. It is not an ArtCraft
+product and is not endorsed by the ArtCraft Team. The ArtCraft Marks are not used in it.
+
 Bundled egui font icons
 
 The canonical egui0.37 dependency includes egui-icons.ttf (a small subset of emoji-icon-font)

@@ -2009,7 +2009,7 @@ fn the_default_app_button_shows_only_with_the_hosts_hook() {
         a.run("ui.backstage", json!({"value": true, "page": "options"})).unwrap();
         let mut h = crate::test_harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_eframe(|_| a);
         h.run_steps(4);
-        assert!(h.query_by_label("Show the community button in the title bar").is_some(), "hook {hook}: the Options page rendered");
+        assert!(h.query_by_label("Show the mini toolbar when text is selected").is_some(), "hook {hook}: the Options page rendered");
         // The row carries the label too (macOS shows it, with Finder's steps instead of a button): ask for the button.
         let button = h.query_all_by_role_and_label(egui::accesskit::Role::Button, LABEL).next().is_some();
         assert_eq!(button, hook, "hook {hook}: the button");

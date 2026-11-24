@@ -338,7 +338,6 @@ impl PreferencesModel for OptionsModel<'_> {
                         b("general.miniToolbar", tl!("Show the mini toolbar when text is selected"), app.ui.mini_toolbar),
                         b("general.darkPage", tl!("Dark page (white text on black)"), app.session.view.dark_mode)
                             .help(tl!("Show documents with their colours inverted, like View › Switch Modes. Saving, printing and PDFs are unchanged.")),
-                        b("general.showCommunity", tl!("Show the community button in the title bar"), app.ui.show_discord),
                         b(
                             "general.fontDownloadNotice",
                             tl!("Tell me when a document's missing fonts can be downloaded"),

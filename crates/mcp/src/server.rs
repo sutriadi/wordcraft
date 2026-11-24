@@ -80,7 +80,7 @@ struct WordcraftTools {
 impl Tools for WordcraftTools {
     fn instructions(&self) -> String {
         format!(
-            "{INSTRUCTIONS} Backend: {}. Community: https://discord.gg/artcraft · https://getartcraft.com/apps/wordcraft · https://github.com/storytold/wordcraft",
+            "{INSTRUCTIONS} Backend: {}. Community: https://getartcraft.com/apps/wordcraft · https://github.com/storytold/wordcraft",
             self.backend.describe()
         )
     }

@@ -73,12 +73,11 @@ pub fn about_info() -> AboutInfo {
     let version = crate::i18n::fmt(tl!("{version} ({build})"), &[("version", env!("CARGO_PKG_VERSION")), ("build", build)]);
     AboutInfo::new(
         tl!("WordCraft").to_string(),
-        tl!("A free, open-source word processor written from scratch in Rust.\nPart of the Crafting Apps from the ArtCraft team.").to_string(),
+        tl!("A free, open-source word processor written from scratch in Rust.\nBased on WordCraft by the ArtCraft team and community.").to_string(),
         version.to_string(),
     )
     .links([
         AboutLink::new(tl!("getartcraft.com/apps/wordcraft").to_string(), "https://getartcraft.com/apps/wordcraft"),
-        AboutLink::new(tl!("Join us on Discord: discord.gg/artcraft").to_string(), "https://discord.gg/artcraft"),
         AboutLink::new(tl!("Source code: github.com/storytold/wordcraft").to_string(), "https://github.com/storytold/wordcraft"),
     ])
     .built_with(tl!("MIT OR Apache-2.0. Copyright (c) 2026 ArtCraft Team and the WordCraft contributors.").to_string())

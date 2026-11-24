@@ -223,16 +223,6 @@ pub(super) fn help(row: &mut RibbonRow<'_>, _app: &mut WordApp) {
             .icon(IconId::new("help"))
             .arrangement(Arrangement::Stacked)
             .show(ui);
-        Button::command(CommandRef::new("ui.checkForUpdates"))
-            .label(tl!("Check for\nUpdates…").to_string())
-            .icon(IconId::new("checkForUpdates"))
-            .arrangement(Arrangement::Stacked)
-            .show(ui);
-        Button::command(CommandRef::new("ui.discord"))
-            .label(tl!("Community\nDiscord").to_string())
-            .icon(IconId::new("discord"))
-            .arrangement(Arrangement::Stacked)
-            .show(ui);
     });
     row.group(RibbonGroup::new("help.agents", tl!("Agents").to_string(), IconId::new("macros").into()), |ui| {
         Button::command(CommandRef::with_params("ui.dialog", json!({"name": "commands"})))

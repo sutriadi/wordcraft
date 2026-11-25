@@ -4,7 +4,8 @@
 //! a `NativeActivity`. Differences from the other shells:
 //!
 //! * No native file dialogs: Open, Save and Insert › Pictures go through the Storage Access
-//!   Framework, which only Kotlin can reach, so the two sides talk through [`bridge`] files.
+//!   Framework, which only Kotlin can reach, so the two sides talk through [`bridge`] files, which
+//!   [`files::AndroidFiles`] presents to the framework host as its file service.
 //! * No control channel, printing or clipboard hooks yet (egui's own text paste still works).
 //!
 //! `android_main` is the entry point `NativeActivity` looks for. Everything else compiles on the
@@ -12,32 +13,36 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod bridge;
+pub mod files;
 pub mod touch;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
-use bridge::{Bridge, SaveResult};
+use craft::host::{Host, Wake};
+use craft::platform::open::{FileIntake, IntakeSender};
+use craft::settings::{Location, OpenOptions, SettingsStore, SharedSettings};
+use craft::ui::InstallSpec;
+use craft::ui::shell::embed;
+use craft::window::system::NoWindows;
 use wordcraft_engine::Session;
-use wordcraft_ui_egui::async_saves::{AsyncSaves, SaveOutcome};
-use wordcraft_ui_egui::{Inbox, Services, WordApp};
+use wordcraft_ui_egui::prefs::Prefs;
+use wordcraft_ui_egui::{Services, WordApp};
+
+use bridge::Bridge;
+use files::AndroidFiles;
 
 /// How often the bridge folder is checked while a picker or a save is open.
 const POLL_EVERY: Duration = Duration::from_millis(200);
 
-/// Wraps the app to move what the bridge delivers into the app's inbox and save tickets.
+/// Wraps the app to feed what the bridge delivers into the file service and the intake.
 struct AndroidShell {
     app: WordApp,
-    inbox: Inbox,
-    bridge: Rc<Bridge>,
-    saves: AsyncSaves,
-    /// Bridge save id → ticket.
-    tickets: Rc<RefCell<HashMap<u64, u64>>>,
-    /// Open pickers shown and not yet answered.
-    opens_open: Rc<RefCell<u32>>,
+    bridge: Arc<Bridge>,
+    files: Arc<AndroidFiles>,
+    intake: IntakeSender,
+    settings: SharedSettings<Prefs>,
     touch: touch::TouchScroll,
     insets: [f32; 4],
     insets_read: f64,
@@ -65,34 +70,11 @@ impl AndroidShell {
 
 impl eframe::App for AndroidShell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let polled = self.bridge.poll();
-        for file in polled.files {
-            {
-                let mut open = self.opens_open.borrow_mut();
-                *open = open.saturating_sub(1);
-            }
-            self.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(file);
-        }
-        for _ in polled.cancelled_opens {
-            {
-                let mut open = self.opens_open.borrow_mut();
-                *open = open.saturating_sub(1);
-            }
-        }
-        for (id, result) in polled.saves {
-            if let Some(ticket) = self.tickets.borrow_mut().remove(&id) {
-                let outcome = match result {
-                    SaveResult::Saved => SaveOutcome::Saved,
-                    SaveResult::Cancelled => SaveOutcome::Cancelled,
-                    SaveResult::Failed(reason) => SaveOutcome::Failed(reason),
-                };
-                self.saves.finish(ticket, outcome);
-            }
-        }
-        if *self.opens_open.borrow() > 0 || !self.tickets.borrow().is_empty() {
+        if self.files.pump(&self.intake) {
             ctx.request_repaint_after(POLL_EVERY);
         }
         self.app.logic(ctx);
+        self.settings.lock().tick(std::time::Instant::now());
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -102,7 +84,7 @@ impl eframe::App for AndroidShell {
         if self.touch.is_pending() {
             ctx.request_repaint_after(Duration::from_millis(100)); // catches a long press
         }
-        self.app.raw_input_hook(ctx, raw);
+        embed::before_input(ctx, |out| self.app.frame_input(out));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -110,34 +92,20 @@ impl eframe::App for AndroidShell {
     }
 }
 
-fn services(inbox: Inbox, bridge: Rc<Bridge>, saves: AsyncSaves, tickets: Rc<RefCell<HashMap<u64, u64>>>, opens_open: Rc<RefCell<u32>>) -> Services {
-    let open_bridge = bridge.clone();
-    let open_count = opens_open.clone();
-    Services {
-        open_async: Some(Box::new(move |purpose: &str| match open_bridge.request_open(purpose) {
-            Ok(_) => *open_count.borrow_mut() += 1,
-            Err(e) => log::error!("couldn't ask for the open picker: {e}"),
-        })),
-        // The suggested name goes to the system picker; the user chooses where it lands.
-        pick_save: Some(Box::new(|name: &str| Some(name.to_string()))),
-        async_saves: Some(saves.clone()),
-        download: Some(Box::new(move |path: &str, bytes: &[u8]| {
-            let ticket = saves.start();
-            match bridge.request_save(path, bytes) {
-                Ok(id) => {
-                    tickets.borrow_mut().insert(id, ticket);
-                    Ok(())
-                }
-                Err(e) => {
-                    saves.finish(ticket, SaveOutcome::Failed(e.to_string()));
-                    Err(format!("couldn't hand the file to Android: {e}"))
-                }
-            }
-        })),
-        inbox: Some(inbox),
-        touch_ui: true,
-        ..Default::default()
+/// Opens the preferences store in the app's private storage, or in memory when that fails.
+fn open_settings(dir: PathBuf) -> SharedSettings<Prefs> {
+    let location = match std::fs::create_dir_all(&dir) {
+        Ok(()) => Location::Dir(dir),
+        Err(e) => {
+            log::warn!("preferences stay in memory: {e}");
+            Location::Memory
+        }
+    };
+    let (store, report) = SettingsStore::<Prefs>::open_with(OpenOptions::new(location));
+    if report.has_problems() {
+        log::warn!("preferences: {report:?}");
     }
+    SharedSettings::new(store)
 }
 
 /// Starts the app. `bridge_root` is a folder in the app's private storage shared with the Kotlin side.
@@ -146,26 +114,37 @@ pub fn run(options: eframe::NativeOptions, bridge_root: PathBuf) -> eframe::Resu
         "WordCraft",
         options,
         Box::new(move |cc| {
-            let bridge = Rc::new(Bridge::new(&bridge_root).map_err(|e| format!("bridge folder {}: {e}", bridge_root.display()))?);
-            let inbox: Inbox = Inbox::default();
-            let saves = AsyncSaves::default();
-            let tickets = Rc::new(RefCell::new(HashMap::new()));
-            let opens_open = Rc::new(RefCell::new(0u32));
+            let ctx = cc.egui_ctx.clone();
+            let bridge = Arc::new(Bridge::new(&bridge_root).map_err(|e| format!("bridge folder {}: {e}", bridge_root.display()))?);
+            let settings = open_settings(bridge_root.parent().map(|p| p.join("settings")).unwrap_or_else(|| bridge_root.join("settings")));
+            let lang = wordcraft_ui_egui::i18n::Lang::from_pref(&settings.lock().get().language);
+            let files = Arc::new(AndroidFiles::new(bridge.clone()));
+            let host = Arc::new(
+                Host::builder(wordcraft_ui_egui::APP)
+                    .i18n(wordcraft_ui_egui::i18n::catalogs())
+                    .files(files.clone())
+                    .settings(Arc::new(settings.clone()))
+                    .lang(lang.craft_lang())
+                    .build(),
+            );
+            let spec = InstallSpec::new(craft::host::target::ShellInfo::current(), Arc::new(NoWindows)).app_id("wordcraft");
+            embed::install(&ctx, spec, &wordcraft_ui_egui::ui_fonts(lang)).map_err(|e| format!("the runtime could not be installed: {e:?}"))?;
+            let wake_ctx = ctx.clone();
+            let (intake, sender) = FileIntake::new(Wake::new(move || wake_ctx.request_repaint()));
             let region = wordcraft_ui_egui::i18n::system_region();
             let mut session = Session::new(wordcraft_engine::blank_document(&region));
             session.system_region = region;
-            let mut app = WordApp::new(session, services(inbox.clone(), bridge.clone(), saves.clone(), tickets.clone(), opens_open.clone()));
+            let services = Services { intake: Some(intake), ..Default::default() };
+            let mut app = WordApp::new(session, services).with_host(host).with_settings(settings.clone());
             // No folder the app may write to behind the user's back: saving always asks (SAF).
             app.autosave = false;
             app.start_screen();
-            let _ = &cc.egui_ctx;
             Ok(Box::new(AndroidShell {
                 app,
-                inbox,
                 bridge,
-                saves,
-                tickets,
-                opens_open,
+                files,
+                intake: sender,
+                settings,
                 touch: touch::TouchScroll::default(),
                 insets: [0.0; 4],
                 insets_read: -1.0,

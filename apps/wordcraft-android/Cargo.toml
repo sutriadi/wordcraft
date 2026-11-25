@@ -23,6 +23,8 @@ wordcraft-doc = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
 egui = { workspace = true }
 log = { workspace = true }
+# The framework host: files, intake, settings and the UI runtime (the web shell's feature set, without the browser).
+craft = { workspace = true, features = ["ui", "settings", "window"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6.1", features = ["native-activity"] }

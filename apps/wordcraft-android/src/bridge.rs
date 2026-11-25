@@ -16,10 +16,10 @@
 //! Every file is written under a temporary name and renamed, so a reader never sees half a file.
 //! Pure `std`: it is unit-tested on the host.
 
-use std::cell::Cell;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// How a save ended on the Kotlin side.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub struct Polled {
 
 pub struct Bridge {
     root: PathBuf,
-    next: Cell<u64>,
+    next: AtomicU64,
 }
 
 /// Parses `"left top right bottom"`; anything malformed gives zeros, and values are clamped to sane sizes.
@@ -82,7 +82,7 @@ impl Bridge {
             }
             fs::create_dir_all(&dir)?;
         }
-        Ok(Self { root, next: Cell::new(1) })
+        Ok(Self { root, next: AtomicU64::new(1) })
     }
 
     /// System bar / cutout / keyboard insets in physical pixels (left, top, right, bottom), as last
@@ -93,9 +93,7 @@ impl Bridge {
     }
 
     fn take_id(&self) -> u64 {
-        let id = self.next.get();
-        self.next.set(id + 1);
-        id
+        self.next.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Asks for the open picker. `purpose` is `document`, `picture`, `font` or `recipients`.

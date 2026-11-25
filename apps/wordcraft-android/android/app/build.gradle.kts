@@ -15,7 +15,7 @@ android {
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = System.getenv("APP_VERSION") ?: "0.1.001"
         // Only the ABIs `build-android.sh` produces.
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     // Upload key: only configured when CI provides the keystore (see .github/workflows/android.yml).
